@@ -1,0 +1,131 @@
+PROYECTO MICROSERVICIOS - BACKEND TODO APP
+
+-------------------------------------------
+TECNOLOGÍAS USADAS:
+- Python 3
+- Flask
+- SQLite (base de datos local)
+- JWT (JSON Web Tokens)
+- Requests (para proxy en API Gateway)
+
+-------------------------------------------
+ESTRUCTURA DE ARCHIVOS:
+- auth_service/app.py       # Servicio de autenticación (registro, login, JWT)
+- user_service/app.py       # Servicio de usuarios (CRUD usuarios)
+- task_service/app.py       # Servicio de tareas (CRUD tareas con estados)
+- api_gateway/app.py        # API Gateway que enruta peticiones a los servicios
+- requirements.txt      # Dependencias Python
+- start_services.sh     # Script para iniciar todos los servicios
+- stop_services.sh      # Script para detener todos los servicios
+
+-------------------------------------------
+REQUISITOS PREVIOS:
+- Python 3 instalado
+- WSL (Windows Subsystem for Linux) o terminal Linux
+- Postman para pruebas (opcional pero recomendado)
+
+-------------------------------------------
+1. CREAR ENTORNO VIRTUAL E INSTALAR DEPENDENCIAS
+
+$ python3 -m venv venv
+$ source venv/bin/activate
+(venv) $ pip install -r requirements.txt
+
+-------------------------------------------
+2. INICIAR SERVICIOS
+
+Ejecutar script para levantar todos los servicios:
+
+$ bash start_services.sh
+
+-------------------------------------------
+3. DETENER SERVICIOS
+
+Para detener los servicios ejecutando:
+
+$ bash stop_services.sh
+
+Ejemplo de stop_services.sh:
+
+#!/bin/bash
+echo "Deteniendo servicios..."
+pkill -f auth_service.py
+pkill -f user_service.py
+pkill -f task_service.py
+pkill -f api_gateway.py
+echo "Servicios detenidos."
+
+-------------------------------------------
+4. PROBAR CON POSTMAN
+
+4.1 Registrar usuario
+
+- Método: POST
+- URL: http://localhost:5000/auth/register
+- Body (raw, JSON):
+{
+  "username": "usuario1",
+  "password": "12345678",
+  "email": "usuario1@correo.com",
+  "birthdate": "1990-01-01",
+  "secret_question": "Color favorito?",
+  "secret_answer": "Azul"
+}
+
+4.2 Login
+
+- Método: POST
+- URL: http://localhost:5000/auth/login
+- Body (raw, JSON):
+{
+  "username": "usuario1",
+  "password": "miContraseña123"
+}
+
+- Guardar token JWT que se recibe para usar en próximas peticiones.
+
+4.3 Crear tarea
+
+- Método: POST
+- URL: http://localhost:5003/tasks
+- Headers:
+    Authorization: Bearer <tu_token_aquí>
+- Body (raw, JSON):
+{
+  "name": "Terminar proyecto",
+  "description": "Completar backend para la app",
+  "deadline": "2025-07-15T23:59:00"
+}
+
+4.4 Listar tareas
+
+- Método: GET
+- URL: http://localhost:5003/tasks
+- Headers:
+    Authorization: Bearer <tu_token_aquí>
+
+4.5 Actualizar tarea
+
+- Método: PUT
+- URL: http://localhost:5003/tasks/<task_id>
+- Headers:
+    Authorization: Bearer <tu_token_aquí>
+- Body (raw, JSON):
+{
+  "status": "Completed"
+}
+
+4.6 Eliminar tarea (borrado lógico)
+
+- Método: DELETE
+- URL: http://localhost:5003/tasks/<task_id>
+- Headers:
+    Authorization: Bearer <tu_token_aquí>
+
+-------------------------------------------
+NOTAS FINALES:
+
+- Todos los servicios usan la misma base de datos SQLite (main_database.db).
+- Los tokens JWT se validan en los servicios que requieren autenticación.
+- El API Gateway enruta las solicitudes a los servicios correspondientes.
+- Puedes añadir validaciones y mejoras según tus necesidades.
