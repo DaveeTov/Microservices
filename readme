@@ -1,131 +1,121 @@
-PROYECTO MICROSERVICIOS - BACKEND TODO APP
+# PROYECTO MICROSERVICIOS - BACKEND TODO APP
 
--------------------------------------------
-TECNOLOGÍAS USADAS:
+Este proyecto implementa una arquitectura de microservicios para una aplicación de tareas.
+Usa Flask, SQLite y JWT en un entorno Linux (idealmente bajo WSL en Windows o PowerShell).
+
+---
+
+## 🧰 TECNOLOGÍAS USADAS
+
 - Python 3
 - Flask
 - SQLite (base de datos local)
 - JWT (JSON Web Tokens)
-- Requests (para proxy en API Gateway)
+- Requests (proxy en API Gateway)
 
--------------------------------------------
-ESTRUCTURA DE ARCHIVOS:
-- auth_service/app.py       # Servicio de autenticación (registro, login, JWT)
-- user_service/app.py       # Servicio de usuarios (CRUD usuarios)
-- task_service/app.py       # Servicio de tareas (CRUD tareas con estados)
-- api_gateway/app.py        # API Gateway que enruta peticiones a los servicios
-- requirements.txt      # Dependencias Python
-- start_services.sh     # Script para iniciar todos los servicios
-- stop_services.sh      # Script para detener todos los servicios
+---
 
--------------------------------------------
-REQUISITOS PREVIOS:
-- Python 3 instalado
-- WSL (Windows Subsystem for Linux) o terminal Linux
-- Postman para pruebas (opcional pero recomendado)
+## 📁 ESTRUCTURA DE ARCHIVOS
+auth_service/app.py # Servicio de autenticación (registro, login, JWT)
+user_service/app.py # Servicio de usuarios (CRUD usuarios)
+task_service/app.py # Servicio de tareas (CRUD tareas con estados)
+api_gateway/app.py # API Gateway que enruta peticiones
+main_database.db # Base de datos SQLite compartida
+requirements.txt # Dependencias Python
+start_services.sh # Inicia todos los servicios
+stop_services.sh # Detiene todos los servicios
 
--------------------------------------------
-1. CREAR ENTORNO VIRTUAL E INSTALAR DEPENDENCIAS
 
-$ python3 -m venv venv
-$ source venv/bin/activate
-(venv) $ pip install -r requirements.txt
+---
 
--------------------------------------------
-2. INICIAR SERVICIOS
+## ✅ REQUISITOS PREVIOS
 
-Ejecutar script para levantar todos los servicios:
+- Python 3
+- [WSL](https://learn.microsoft.com/en-us/windows/wsl/) (Windows Subsystem for Linux) o terminal Linux
+- PowerShell (si estás en Windows y no usas WSL)
+- `curl` instalado
+- Postman (opcional)
 
-$ bash start_services.sh
+---
 
--------------------------------------------
-3. DETENER SERVICIOS
+## 🔧 1. CREAR ENTORNO VIRTUAL E INSTALAR DEPENDENCIAS
 
-Para detener los servicios ejecutando:
+### En **WSL / Linux**:
 
-$ bash stop_services.sh
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
-Ejemplo de stop_services.sh:
+python -m venv venv
+.\venv\Scripts\activate
+pip install -r requirements.txt
 
-#!/bin/bash
-echo "Deteniendo servicios..."
-pkill -f auth_service.py
-pkill -f user_service.py
-pkill -f task_service.py
-pkill -f api_gateway.py
-echo "Servicios detenidos."
+🚀 2. INICIAR SERVICIOS Solo desdeEn WSL / Linux:
 
--------------------------------------------
-4. PROBAR CON POSTMAN
+./start_services.sh
 
-4.1 Registrar usuario
+🛑 3. DETENER SERVICIOS
+./stop_services.sh
 
-- Método: POST
-- URL: http://localhost:5000/auth/register
-- Body (raw, JSON):
-{
-  "username": "usuario1",
-  "password": "12345678",
-  "email": "usuario1@correo.com",
-  "birthdate": "1990-01-01",
-  "secret_question": "Color favorito?",
-  "secret_answer": "Azul"
-}
+4. PROBAR FUNCIONALIDAD (con curl en WSL o PowerShell)
+
+curl -X POST http://localhost:5000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "usuario5",
+    "password": "12345678",
+    "email": "usuario4@correo.com",
+    "birthdate": "1990-01-01",
+    "secret_question": "Color favorito?",
+    "secret_answer": "Azul"
+}'
+
+4.1 Registro de usuario
+curl -X POST http://localhost:5000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "usuario5",
+    "password": "12345678",
+    "email": "usuario4@correo.com",
+    "birthdate": "1990-01-01",
+    "secret_question": "Color favorito?",
+    "secret_answer": "Azul"
+}'
 
 4.2 Login
-
-- Método: POST
-- URL: http://localhost:5000/auth/login
-- Body (raw, JSON):
-{
-  "username": "usuario1",
-  "password": "miContraseña123"
-}
-
-- Guardar token JWT que se recibe para usar en próximas peticiones.
+curl -X POST http://localhost:5000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "usuario5",
+    "password": "12345678"
+}'
 
 4.3 Crear tarea
-
-- Método: POST
-- URL: http://localhost:5003/tasks
-- Headers:
-    Authorization: Bearer <tu_token_aquí>
-- Body (raw, JSON):
-{
-  "name": "Terminar proyecto",
-  "description": "Completar backend para la app",
-  "deadline": "2025-07-15T23:59:00"
-}
+curl -X POST http://localhost:5000/tasks \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <TOKEN generado>s" \
+  -d '{
+    "name": "Terminar proyecto",
+    "description": "Completar backend para la app",
+    "deadline": "2025-07-15T23:59:00"
+}'
 
 4.4 Listar tareas
-
-- Método: GET
-- URL: http://localhost:5003/tasks
-- Headers:
-    Authorization: Bearer <tu_token_aquí>
+curl -X GET http://localhost:5000/tasks \
+  -H "Authorization: Bearer <TOKEN generado>"
 
 4.5 Actualizar tarea
-
-- Método: PUT
-- URL: http://localhost:5003/tasks/<task_id>
-- Headers:
-    Authorization: Bearer <tu_token_aquí>
-- Body (raw, JSON):
-{
-  "status": "Completed"
-}
+curl -X PUT http://localhost:5000/tasks/<id de tarea> \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NCwidXNlcm5hbWUiOiJ1c3VhcmlvNCIsImV4cCI6MTc1MTA3ODA0MH0.tr5pmXyjowuFhyj-YoY2uC158NkLDN-Egs_byqdleaI" \
+  -d '{
+    "status": "Paused"
+}'
 
 4.6 Eliminar tarea (borrado lógico)
 
-- Método: DELETE
-- URL: http://localhost:5003/tasks/<task_id>
-- Headers:
-    Authorization: Bearer <tu_token_aquí>
+curl -X DELETE http://localhost:5000/tasks/3 \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6NCwidXNlcm5hbWUiOiJ1c3VhcmlvNCIsImV4cCI6MTc1MTA3ODA0MH0.tr5pmXyjowuFhyj-YoY2uC158NkLDN-Egs_byqdleaI"
 
--------------------------------------------
-NOTAS FINALES:
 
-- Todos los servicios usan la misma base de datos SQLite (main_database.db).
-- Los tokens JWT se validan en los servicios que requieren autenticación.
-- El API Gateway enruta las solicitudes a los servicios correspondientes.
-- Puedes añadir validaciones y mejoras según tus necesidades.
