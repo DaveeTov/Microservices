@@ -1,55 +1,128 @@
+import time
+import json
 import requests
-from flask import Flask, jsonify, request
+from datetime import datetime
+from flask import Flask, make_response, request
+from flask_cors import CORS
 
-# Crear una instancia de la aplicación Flask
 app = Flask(__name__)
 
-# URLs base de los microservicios que se van a consumir
-AUTH_SERVICE_URL = 'http://localhost:5001'   # Servicio de autenticación
-USER_SERVICE_URL = 'http://localhost:5002'   # Servicio de usuario
-TASK_SERVICE_URL = 'http://localhost:5003'   # Servicio de tareas
+# --------------------------
+# CORS Configuración
+# --------------------------
+CORS(app,
+     origins=["http://localhost:4200"],
+     supports_credentials=True,
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
-# Función genérica para reenviar (proxy) la solicitud HTTP al microservicio correspondiente
-def proxy_request(service_url, path):
-    method = request.method  # Obtener el método HTTP (GET, POST, etc.) de la solicitud entrante
-    url = f'{service_url}/{path}'  # Construir la URL completa hacia el microservicio
+# --------------------------
+# Función para guardar logs como JSON
+# --------------------------
+def save_log(data):
+    log_line = json.dumps(data, ensure_ascii=False)
+    with open("gateway_logs.jsonl", "a", encoding="utf-8") as log_file:
+        log_file.write(log_line + "\n")
 
-    # Hacer la petición HTTP hacia el microservicio usando la librería requests
-    resp = requests.request(
-        method=method,  # Método HTTP
-        url=url,        # URL destino
-        json=request.get_json(silent=True),  # Datos JSON recibidos, si hay
-        # Copiar los headers de la solicitud original, excepto el 'host' que puede interferir
-        headers={key: value for key, value in request.headers if key.lower() != 'host'}
-    )
+# --------------------------
+# Middleware para logging
+# --------------------------
+@app.before_request
+def log_request():
+    request.start_time = time.time()
+    json_payload = request.get_json(silent=True)
 
-    # Intentar devolver la respuesta JSON del microservicio con el código de estado HTTP
-    try:
-        return jsonify(resp.json()), resp.status_code
-    except ValueError:
-        # Si la respuesta no es JSON, devolver el texto plano y el código de estado
-        return resp.text, resp.status_code
+    # Identificación del usuario: Authorization o JSON
+    usuario = None
+    if "Authorization" in request.headers:
+        usuario = request.headers.get("Authorization")
+    elif isinstance(json_payload, dict) and 'email' in json_payload:
+        usuario = json_payload['email']
 
-# Ruta que proxy para las solicitudes que van al servicio de autenticación
-@app.route('/auth/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-def proxy_auth(path):
-    return proxy_request(AUTH_SERVICE_URL, path)
+    # Detectar microservicio: /auth, /user, /task, etc.
+    path_parts = request.path.strip("/").split("/")
+    servicio = path_parts[0] if path_parts else "desconocido"
 
-# Ruta que proxy para las solicitudes que van al servicio de usuario
-@app.route('/user/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-def proxy_user(path):
-    return proxy_request(USER_SERVICE_URL, path)
+    request.log_data = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "method": request.method,
+        "path": request.path,
+        "servicio": servicio,
+        "usuario": usuario,
+        "ip": request.remote_addr,
+    }
 
-# Rutas para el servicio de tareas
-# Cuando no se pasa un id específico (solo /tasks), se permiten GET y POST
+@app.after_request
+def log_response(response):
+    duration = time.time() - getattr(request, 'start_time', time.time())
+    log_data = getattr(request, 'log_data', {})
+    log_data.update({
+        "status_code": response.status_code,
+        "response_time_seconds": round(duration, 3)
+    })
+    save_log(log_data)
+    return response
+
+# --------------------------
+# URLs de microservicios
+# --------------------------
+AUTH_SERVICE_URL = 'http://localhost:5001'
+USER_SERVICE_URL = 'http://localhost:5002'
+TASK_SERVICE_URL = 'http://localhost:5003'
+
+# --------------------------
+# Rutas para redireccionamiento
+# --------------------------
+@app.route('/health', methods=['GET'])
+def health():
+    return {'status': 'OK', 'message': 'Proxy server running'}
+
+@app.route('/auth/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def auth_proxy(path):
+    return forward_request(AUTH_SERVICE_URL, 'auth', path)
+
+@app.route('/user/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def user_proxy(path):
+    return forward_request(USER_SERVICE_URL, 'user', path)
+
+@app.route('/task/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def task_proxy(path):
+    return forward_request(TASK_SERVICE_URL, 'task', path)
+
 @app.route('/tasks', methods=['GET', 'POST'])
-# Cuando se pasa un path/id, se permiten GET, PUT y DELETE
-@app.route('/tasks/<path:path>', methods=['GET', 'PUT', 'DELETE'])
-def proxy_tasks(path=''):
-    # Asegura que siempre redirige a /tasks o /tasks/<id>
-    fixed_path = 'tasks' if path == '' else f'tasks/{path}'
-    return proxy_request(TASK_SERVICE_URL, fixed_path)
+@app.route('/tasks/<int:task_id>', methods=['GET', 'PUT', 'DELETE'])
+def tasks_direct_proxy(task_id=None):
+    path = f'tasks/{task_id}' if task_id is not None else 'tasks'
+    return forward_request(TASK_SERVICE_URL, 'tasks', path)
 
-# Ejecutar la app Flask en el puerto 5000 en modo debug (útil para desarrollo)
+# --------------------------
+# Función principal de forwarding
+# --------------------------
+def forward_request(service_url, prefix, path):
+    url = f'{service_url}/{path}'
+    try:
+        resp = requests.request(
+            method=request.method,
+            url=url,
+            json=request.get_json(silent=True),
+            headers={k: v for k, v in request.headers if k.lower() != 'host'},
+            timeout=10
+        )
+        response = make_response(resp.content, resp.status_code)
+        response.headers['Content-Type'] = resp.headers.get('Content-Type', 'application/json')
+        return response
+    except requests.exceptions.RequestException as e:
+        log_data = getattr(request, 'log_data', {})
+        log_data.update({
+            "status_code": 503,
+            "response_time_seconds": round(time.time() - request.start_time, 3),
+            "error": str(e)
+        })
+        save_log(log_data)
+        return make_response({'error': 'Service unavailable'}, 503)
+
+# --------------------------
+# Ejecutar app
+# --------------------------
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
