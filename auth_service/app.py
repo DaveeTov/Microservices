@@ -200,10 +200,11 @@ def debug_otp():
         return jsonify({'current_otp': current_otp})
     
     return jsonify({'error': 'Usuario no encontrado'}), 404
-
-
 # Inicializar app
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     port = int(os.environ.get("PORT", 5001))
     app.run(host='0.0.0.0', port=port)
+
+
