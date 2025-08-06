@@ -88,29 +88,41 @@ def tasks_direct_proxy(task_id=None):
     path = f'tasks/{task_id}' if task_id is not None else 'tasks'
     return forward_request(TASK_SERVICE_URL, 'tasks', path)
 
-def forward_request(service_url, prefix, path):
+def forward_request(service_url, prefix, path, max_retries=3, delay=3):
     url = f'{service_url}/{path}'
-    try:
-        resp = requests.request(
-            method=request.method,
-            url=url,
-            json=request.get_json(silent=True),
-            headers={k: v for k, v in request.headers if k.lower() != 'host'},
-            timeout=10
-        )
-        response = make_response(resp.content, resp.status_code)
-        response.headers['Content-Type'] = resp.headers.get('Content-Type', 'application/json')
-        return response
-    except requests.exceptions.RequestException as e:
-        log_data = getattr(request, 'log_data', {})
-        log_data.update({
-            "status_code": 503,
-            "response_time_seconds": round(time.time() - request.start_time, 3),
-            "error": str(e)
-        })
-        save_log(log_data)
-        return make_response({'error': 'Service unavailable'}, 503)
+    for attempt in range(max_retries):
+        try:
+            resp = requests.request(
+                method=request.method,
+                url=url,
+                json=request.get_json(silent=True),
+                headers={k: v for k, v in request.headers if k.lower() != 'host'},
+                timeout=10
+            )
+            if resp.status_code != 503:
+                response = make_response(resp.content, resp.status_code)
+                response.headers['Content-Type'] = resp.headers.get('Content-Type', 'application/json')
+                return response
+            else:
+                time.sleep(delay)  # Espera antes de reintentar
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries - 1:
+                log_data = getattr(request, 'log_data', {})
+                log_data.update({
+                    "status_code": 503,
+                    "response_time_seconds": round(time.time() - request.start_time, 3),
+                    "error": str(e)
+                })
+                save_log(log_data)
+                return make_response({'error': 'Service unavailable'}, 503)
+            else:
+                time.sleep(delay)  # Espera antes de reintentar
+
+    # Si después de reintentos sigue fallando
+    return make_response({'error': 'Service unavailable after retries'}, 503)
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+
