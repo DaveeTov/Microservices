@@ -9,6 +9,10 @@ import pyotp
 import qrcode
 from flask import Flask, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})  # Permite todo temporalmente
 
 # Base de datos y clave secreta
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -215,3 +219,4 @@ init_db()
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     app.run(host='0.0.0.0', port=port)
+
