@@ -59,4 +59,7 @@ def delete_user(user_id):
 
 # Ejecutar la app Flask en el puerto 5002 con debug activado
 if __name__ == '__main__':
-    app.run(port=5002, debug=True)
+    port = int(os.environ.get("PORT", 5002))
+    app.run(host='0.0.0.0', port=port)
+
+
