@@ -19,8 +19,6 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DB_NAME = os.path.join(BASE_DIR, 'main_database.db')
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 
-# Inicializar app Flask
-app = Flask(__name__)
 
 # Crear tabla si no existe
 def init_db():
@@ -219,4 +217,5 @@ init_db()
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     app.run(host='0.0.0.0', port=port)
+
 
