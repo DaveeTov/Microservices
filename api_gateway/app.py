@@ -109,7 +109,7 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
                 url=url,
                 json=request.get_json(silent=True),
                 headers={k: v for k, v in request.headers if k.lower() != 'host'},
-                timeout=10
+                timeout=30
             )
             if resp.status_code != 503:
                 response = make_response(resp.content, resp.status_code)
@@ -135,3 +135,4 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+
