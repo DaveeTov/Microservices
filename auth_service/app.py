@@ -1,5 +1,4 @@
 import base64
-import datetime
 import io
 import os
 import sqlite3
@@ -10,19 +9,16 @@ import qrcode
 from flask import Flask, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 from flask_cors import CORS
-from flask import jsonify
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # Permite todo temporalmente
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Base de datos y clave secreta
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DB_NAME = os.path.join(BASE_DIR, 'main_database.db')
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 
 
-# Crear tabla si no existe
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
@@ -40,17 +36,17 @@ def init_db():
             )
         ''')
 
-# ✅ Ruta raíz para evitar 404 y permitir monitoreo
+
 @app.route('/')
 def home():
     return jsonify({"status": "Auth service activo"}), 200
 
-# ✅ Ruta de salud para UptimeRobot u otros monitores
+
 @app.route('/health')
 def health_check():
     return jsonify({"status": "ok"}), 200
 
-# Registro de usuario con MFA
+
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -82,7 +78,6 @@ def register():
             conn.commit()
             user_id = cursor.lastrowid
 
-        # Generar URL OTP
         otp_url = pyotp.TOTP(mfa_secret).provisioning_uri(
             name=data['username'], issuer_name="MiAppSegura"
         )
@@ -104,48 +99,46 @@ def register():
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-# Login inicial: usuario y contraseña
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
-    
+
     if not data:
         return jsonify({'error': 'No se recibieron datos'}), 400
-    
+
     username = data.get('username')
     password = data.get('password')
-    
+
     if not username or not password:
         return jsonify({'error': 'Usuario y contraseña son requeridos'}), 400
 
     print(f"🔍 Intentando login para usuario: {username}")
-    
+
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
             user = cursor.fetchone()
-            
+
         if not user:
             print(f"❌ Usuario {username} no encontrado")
             return jsonify({'error': 'Credenciales incorrectas'}), 401
-            
+
         if not check_password_hash(user[2], password):
             print(f"❌ Contraseña incorrecta para usuario {username}")
             return jsonify({'error': 'Credenciales incorrectas'}), 401
-            
+
         print(f"✅ Credenciales válidas para usuario {username}")
-        
-        # Crear token temporal con tiempo de expiración
+
         temp_token = jwt.encode({
             'id': user[0],
             'username': user[1],
             'temp': True,
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
+            'exp': datetime.utcnow() + timedelta(minutes=5)
         }, SECRET_KEY, algorithm='HS256')
 
         print(f"🕒 Token temporal generado para usuario {username}")
-        
+
         return jsonify({
             'message': 'OTP requerido',
             'tempToken': temp_token
@@ -156,83 +149,13 @@ def login():
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-# Validación del OTP
-@app.route('/verify-otp', methods=['POST'])
-def verify_otp():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return jsonify({'error': 'Token temporal requerido'}), 401
-    token = auth_header.split(" ")[1]
-    try:
-        data_token = jwt.decode(token, SECRET_KEY, algorithms=['HS256'], leeway=30)
-        if not data_token.get('temp'):
-            return jsonify({'error': 'Token inválido'}), 401
-    except jwt.ExpiredSignatureError:
-        return jsonify({'error': 'Token expirado'}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({'error': 'Token inválido'}), 401
-
-    otp_code = request.json.get('otp')
-    user_id = data_token['id']
-
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT mfa_secret FROM users WHERE id = ?", (user_id,))
-        row = cursor.fetchone()
-
-    if row:
-        mfa_secret = row[0]
-        totp = pyotp.TOTP(mfa_secret)
-
-        # ✅ Se agregó valid_window=1
-        if totp.verify(otp_code, valid_window=1):
-            full_token = jwt.encode({
-                'id': user_id,
-                'username': data_token['username'],
-                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-            }, SECRET_KEY, algorithm='HS256')
-            return jsonify({'token': full_token})
-
-    return jsonify({'error': 'OTP inválido'}), 401
-
-
 @app.route('/server-time', methods=['GET'])
 def server_time():
-    return jsonify({
-        "server_utc": datetime.utcnow().isoformat()
-    })
+    return jsonify({"server_utc": datetime.utcnow().isoformat()})
 
 
-# Ruta de debug OTP - solo para desarrollo
-@app.route('/debug-otp', methods=['POST'])
-def debug_otp():
-    data = request.get_json()
-    username = data.get('username')
-    
-    if not username:
-        return jsonify({'error': 'Username requerido'}), 400
-    
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT mfa_secret FROM users WHERE username = ?", (username,))
-        row = cursor.fetchone()
-    
-    if row:
-        mfa_secret = row[0]
-        totp = pyotp.TOTP(mfa_secret)
-        current_otp = totp.now()
-        return jsonify({'current_otp': current_otp})
-    
-    return jsonify({'error': 'Usuario no encontrado'}), 404
-
-# Inicializar base de datos
 init_db()
 
-# Iniciar servidor
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     app.run(host='0.0.0.0', port=port)
-
-
-
-
