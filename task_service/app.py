@@ -9,12 +9,14 @@ from flask_cors import CORS
 
 # Crear la aplicación Flask
 app = Flask(__name__)
-CORS(app, origins=['http://localhost:4200'], supports_credentials=True)
+CORS(app, origins=['*'], supports_credentials=True)  # Aceptar todo para producción con cuidado
 
+# Constantes globales
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DB_NAME = os.path.join(BASE_DIR, 'main_database.db')
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 
+# Decorador para requerir token JWT
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -32,6 +34,7 @@ def token_required(f):
         return f(*args, **kwargs)
     return decorated
 
+# Inicialización de la base de datos
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
@@ -50,6 +53,17 @@ def init_db():
         ''')
         conn.commit()
 
+# Ruta raíz para evitar 404
+@app.route('/')
+def home():
+    return {'status': 'Task service activo'}, 200
+
+# Ruta de salud para Render/UptimeRobot
+@app.route('/health', methods=['GET'])
+def health():
+    return {'status': 'OK', 'message': 'Task microservice running'}, 200
+
+# Crear tarea
 @app.route('/tasks', methods=['POST'])
 @token_required
 def create_task():
@@ -75,6 +89,7 @@ def create_task():
 
     return jsonify({'message': 'Tarea creada', 'task_id': task_id}), 201
 
+# Obtener tareas activas del usuario
 @app.route('/tasks', methods=['GET'])
 @token_required
 def get_tasks():
@@ -83,19 +98,20 @@ def get_tasks():
         cursor = conn.cursor()
         cursor.execute('SELECT id, name, description, create_at, deadline, status, isAlive FROM tasks WHERE created_by = ? AND isAlive = 1', (created_by,))
         tasks = cursor.fetchall()
-    tasks_list = []
-    for t in tasks:
-        tasks_list.append({
-            'id': t[0],
-            'name': t[1],
-            'description': t[2],
-            'create_at': t[3],
-            'deadline': t[4],
-            'status': t[5],
-            'isAlive': bool(t[6])
-        })
-    return jsonify({'tasks': tasks_list})
 
+    tasks_list = [{
+        'id': t[0],
+        'name': t[1],
+        'description': t[2],
+        'create_at': t[3],
+        'deadline': t[4],
+        'status': t[5],
+        'isAlive': bool(t[6])
+    } for t in tasks]
+
+    return jsonify({'tasks': tasks_list}), 200
+
+# Obtener tarea individual
 @app.route('/tasks/<int:task_id>', methods=['GET'])
 @token_required
 def get_task(task_id):
@@ -104,8 +120,10 @@ def get_task(task_id):
         cursor = conn.cursor()
         cursor.execute('SELECT id, name, description, create_at, deadline, status, isAlive FROM tasks WHERE id = ? AND created_by = ? AND isAlive = 1', (task_id, created_by))
         t = cursor.fetchone()
+
     if not t:
         return jsonify({'error': 'Tarea no encontrada'}), 404
+
     task = {
         'id': t[0],
         'name': t[1],
@@ -115,8 +133,9 @@ def get_task(task_id):
         'status': t[5],
         'isAlive': bool(t[6])
     }
-    return jsonify({'task': task})
+    return jsonify({'task': task}), 200
 
+# Actualizar tarea
 @app.route('/tasks/<int:task_id>', methods=['PUT'])
 @token_required
 def update_task(task_id):
@@ -124,10 +143,16 @@ def update_task(task_id):
     created_by = request.user['id']
     fields = ['name', 'description', 'deadline', 'status', 'isAlive']
     update_fields = {field: data[field] for field in fields if field in data}
+
     if 'status' in update_fields and update_fields['status'] not in ['InProgress', 'Revision', 'Completed', 'Paused']:
         return jsonify({'error': 'Estado inválido'}), 400
+
+    if not update_fields:
+        return jsonify({'error': 'No se recibieron campos para actualizar'}), 400
+
     set_clause = ', '.join(f"{field} = ?" for field in update_fields.keys())
     values = list(update_fields.values()) + [task_id, created_by]
+
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute(f'''
@@ -135,10 +160,13 @@ def update_task(task_id):
             WHERE id = ? AND created_by = ?
         ''', values)
         conn.commit()
+
         if cursor.rowcount == 0:
             return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
-    return jsonify({'message': 'Tarea actualizada'})
 
+    return jsonify({'message': 'Tarea actualizada'}), 200
+
+# Borrado lógico
 @app.route('/tasks/<int:task_id>', methods=['DELETE'])
 @token_required
 def delete_task(task_id):
@@ -150,15 +178,14 @@ def delete_task(task_id):
             WHERE id = ? AND created_by = ?
         ''', (task_id, created_by))
         conn.commit()
+
         if cursor.rowcount == 0:
             return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
-    return jsonify({'message': 'Tarea eliminada (borrado lógico)'})
 
+    return jsonify({'message': 'Tarea eliminada (borrado lógico)'}), 200
+
+# Iniciar microservicio
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get("PORT", 5003))
     app.run(host='0.0.0.0', port=port)
-
-
-
-
