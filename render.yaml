@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: api-gateway
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    rootDir: api_gateway
+    envVars:
+      - key: AUTH_SERVICE_URL
+        value: https://auth-service.onrender.com
+      - key: USER_SERVICE_URL
+        value: https://user-service.onrender.com
+      - key: TASK_SERVICE_URL
+        value: https://task-service.onrender.com
+      - key: SECRET_KEY
+        value: jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj
+
+  - type: web
+    name: auth-service
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    rootDir: auth_service
+
+  - type: web
+    name: user-service
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    rootDir: user_service
+
+  - type: web
+    name: task-service
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    rootDir: task_service
+
+
