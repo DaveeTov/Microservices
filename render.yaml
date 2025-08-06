@@ -23,6 +23,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     rootDir: auth_service
+    envVars:
+      - key: SECRET_KEY
+        value: jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj
 
   - type: web
     name: user-service
@@ -31,6 +34,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     rootDir: user_service
+    envVars:
+      - key: DUMMY
+        value: placeholder  # Puedes borrar esto si no necesitas variables
 
   - type: web
     name: task-service
@@ -39,5 +45,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     rootDir: task_service
-
-
+    envVars:
+      - key: SECRET_KEY
+        value: jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj
