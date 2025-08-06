@@ -36,6 +36,16 @@ def init_db():
             )
         ''')
 
+# ✅ Ruta raíz para evitar 404 y permitir monitoreo
+@app.route('/')
+def home():
+    return jsonify({"status": "Auth service activo"}), 200
+
+# ✅ Ruta de salud para UptimeRobot u otros monitores
+@app.route('/health')
+def health_check():
+    return jsonify({"status": "ok"}), 200
+
 # Registro de usuario con MFA
 @app.route('/register', methods=['POST'])
 def register():
@@ -95,7 +105,6 @@ def register():
 def login():
     data = request.get_json()
     
-    # Validación mejorada
     if not data:
         return jsonify({'error': 'No se recibieron datos'}), 400
     
@@ -123,7 +132,7 @@ def login():
             
         print(f"✅ Credenciales válidas para usuario {username}")
         
-        # Crear token temporal con tiempo de expiración correcto
+        # Crear token temporal con tiempo de expiración
         temp_token = jwt.encode({
             'id': user[0],
             'username': user[1],
@@ -143,7 +152,7 @@ def login():
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-# Validación del OTP - Versión actualizada y limpia
+# Validación del OTP
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
     auth_header = request.headers.get('Authorization')
@@ -151,7 +160,6 @@ def verify_otp():
         return jsonify({'error': 'Token temporal requerido'}), 401
     token = auth_header.split(" ")[1]
     try:
-        # ✅ Añadido leeway de 30 segundos para tolerancia en tiempo
         data_token = jwt.decode(token, SECRET_KEY, algorithms=['HS256'], leeway=30)
         if not data_token.get('temp'):
             return jsonify({'error': 'Token inválido'}), 401
@@ -178,10 +186,9 @@ def verify_otp():
     return jsonify({'error': 'OTP inválido'}), 401
 
 
-# Ruta para obtener el código OTP actual (solo para desarrollo/debug)
+# Ruta de debug OTP - solo para desarrollo
 @app.route('/debug-otp', methods=['POST'])
 def debug_otp():
-    """Endpoint para debug - NO usar en producción"""
     data = request.get_json()
     username = data.get('username')
     
@@ -200,11 +207,11 @@ def debug_otp():
         return jsonify({'current_otp': current_otp})
     
     return jsonify({'error': 'Usuario no encontrado'}), 404
-# Inicializar app
+
+# Inicializar base de datos
 init_db()
 
+# Iniciar servidor
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     app.run(host='0.0.0.0', port=port)
-
-
