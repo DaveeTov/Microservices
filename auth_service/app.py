@@ -171,22 +171,28 @@ def verify_otp():
         return jsonify({'error': 'Token expirado'}), 401
     except jwt.InvalidTokenError:
         return jsonify({'error': 'Token inválido'}), 401
+
     otp_code = request.json.get('otp')
     user_id = data_token['id']
+
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT mfa_secret FROM users WHERE id = ?", (user_id,))
         row = cursor.fetchone()
+
     if row:
         mfa_secret = row[0]
         totp = pyotp.TOTP(mfa_secret)
-        if totp.verify(otp_code):
+
+        # ✅ Se agregó valid_window=1
+        if totp.verify(otp_code, valid_window=1):
             full_token = jwt.encode({
                 'id': user_id,
                 'username': data_token['username'],
                 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)
             }, SECRET_KEY, algorithm='HS256')
             return jsonify({'token': full_token})
+
     return jsonify({'error': 'OTP inválido'}), 401
 
 
@@ -226,6 +232,7 @@ init_db()
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     app.run(host='0.0.0.0', port=port)
+
 
 
 
