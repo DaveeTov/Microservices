@@ -1,49 +1,34 @@
 import json
 import time
+import os
 from datetime import datetime
 
-import jwt  # <- Asegúrate de tener esto instalado: pip install pyjwt
+import jwt
 import requests
 from flask import Flask, make_response, request
 from flask_cors import CORS
 
 app = Flask(__name__)
-
-# --------------------------
-# CORS Configuración
-# --------------------------
 CORS(app,
-     origins=["http://localhost:4200"],
+     origins=["*"],  # Reemplaza con tu frontend real si aplica
      supports_credentials=True,
      allow_headers=["Content-Type", "Authorization"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
-# --------------------------
-# Clave secreta compartida con el microservicio de auth
-# --------------------------
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 JWT_ALGORITHM = 'HS256'
 
-# --------------------------
-# Función para guardar logs como JSON
-# --------------------------
 def save_log(data):
     log_line = json.dumps(data, ensure_ascii=False)
     with open("gateway_logs.jsonl", "a", encoding="utf-8") as log_file:
         log_file.write(log_line + "\n")
 
-# --------------------------
-# Middleware para logging
-# --------------------------
 @app.before_request
 def log_request():
     request.start_time = time.time()
     json_payload = request.get_json(silent=True)
-
-    # Obtener usuario del token JWT o del cuerpo
     usuario = None
     token = request.headers.get("Authorization")
-    
     if token and token.startswith("Bearer "):
         try:
             decoded = jwt.decode(token[7:], SECRET_KEY, algorithms=[JWT_ALGORITHM])
@@ -55,10 +40,8 @@ def log_request():
     elif isinstance(json_payload, dict) and 'email' in json_payload:
         usuario = json_payload['email']
 
-    # Detectar microservicio: /auth, /user, /task, etc.
     path_parts = request.path.strip("/").split("/")
     servicio = path_parts[0] if path_parts else "desconocido"
-
     request.log_data = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "method": request.method,
@@ -79,16 +62,10 @@ def log_response(response):
     save_log(log_data)
     return response
 
-# --------------------------
-# URLs de microservicios
-# --------------------------
-AUTH_SERVICE_URL = 'http://localhost:5001'
-USER_SERVICE_URL = 'http://localhost:5002'
-TASK_SERVICE_URL = 'http://localhost:5003'
+AUTH_SERVICE_URL = os.environ.get("AUTH_SERVICE_URL", "http://localhost:5001")
+USER_SERVICE_URL = os.environ.get("USER_SERVICE_URL", "http://localhost:5002")
+TASK_SERVICE_URL = os.environ.get("TASK_SERVICE_URL", "http://localhost:5003")
 
-# --------------------------
-# Rutas para redireccionamiento
-# --------------------------
 @app.route('/health', methods=['GET'])
 def health():
     return {'status': 'OK', 'message': 'Proxy server running'}
@@ -111,9 +88,6 @@ def tasks_direct_proxy(task_id=None):
     path = f'tasks/{task_id}' if task_id is not None else 'tasks'
     return forward_request(TASK_SERVICE_URL, 'tasks', path)
 
-# --------------------------
-# Función principal de forwarding
-# --------------------------
 def forward_request(service_url, prefix, path):
     url = f'{service_url}/{path}'
     try:
@@ -137,8 +111,6 @@ def forward_request(service_url, prefix, path):
         save_log(log_data)
         return make_response({'error': 'Service unavailable'}, 503)
 
-# --------------------------
-# Ejecutar app
-# --------------------------
 if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
