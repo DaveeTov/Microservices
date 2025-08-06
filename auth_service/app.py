@@ -10,6 +10,8 @@ import qrcode
 from flask import Flask, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 from flask_cors import CORS
+from flask import jsonify
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})  # Permite todo temporalmente
@@ -188,6 +190,13 @@ def verify_otp():
     return jsonify({'error': 'OTP inválido'}), 401
 
 
+@app.route('/server-time', methods=['GET'])
+def server_time():
+    return jsonify({
+        "server_utc": datetime.utcnow().isoformat()
+    })
+
+
 # Ruta de debug OTP - solo para desarrollo
 @app.route('/debug-otp', methods=['POST'])
 def debug_otp():
@@ -217,5 +226,6 @@ init_db()
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     app.run(host='0.0.0.0', port=port)
+
 
 
