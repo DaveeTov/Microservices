@@ -18,11 +18,13 @@ CORS(app,
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 JWT_ALGORITHM = 'HS256'
 
+# Guardar logs de peticiones
 def save_log(data):
     log_line = json.dumps(data, ensure_ascii=False)
     with open("gateway_logs.jsonl", "a", encoding="utf-8") as log_file:
         log_file.write(log_line + "\n")
 
+# Middleware para registrar la petición
 @app.before_request
 def log_request():
     request.start_time = time.time()
@@ -51,6 +53,7 @@ def log_request():
         "ip": request.remote_addr,
     }
 
+# Middleware para registrar la respuesta
 @app.after_request
 def log_response(response):
     duration = time.time() - getattr(request, 'start_time', time.time())
@@ -62,14 +65,22 @@ def log_response(response):
     save_log(log_data)
     return response
 
+# 🔗 URLs de los servicios (ajusta si estás en producción)
 AUTH_SERVICE_URL = os.environ.get("AUTH_SERVICE_URL", "http://localhost:5001")
 USER_SERVICE_URL = os.environ.get("USER_SERVICE_URL", "http://localhost:5002")
 TASK_SERVICE_URL = os.environ.get("TASK_SERVICE_URL", "http://localhost:5003")
 
+# ✅ Ruta raíz para evitar 404
+@app.route('/')
+def home():
+    return {'status': 'API Gateway activo'}, 200
+
+# ✅ Ruta de salud para monitoreo
 @app.route('/health', methods=['GET'])
 def health():
-    return {'status': 'OK', 'message': 'Proxy server running'}
+    return {'status': 'OK', 'message': 'Proxy server running'}, 200
 
+# Proxys
 @app.route('/auth/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def auth_proxy(path):
     return forward_request(AUTH_SERVICE_URL, 'auth', path)
@@ -88,6 +99,7 @@ def tasks_direct_proxy(task_id=None):
     path = f'tasks/{task_id}' if task_id is not None else 'tasks'
     return forward_request(TASK_SERVICE_URL, 'tasks', path)
 
+# Función para reenviar peticiones a los microservicios
 def forward_request(service_url, prefix, path, max_retries=3, delay=3):
     url = f'{service_url}/{path}'
     for attempt in range(max_retries):
@@ -104,7 +116,7 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
                 response.headers['Content-Type'] = resp.headers.get('Content-Type', 'application/json')
                 return response
             else:
-                time.sleep(delay)  # Espera antes de reintentar
+                time.sleep(delay)
         except requests.exceptions.RequestException as e:
             if attempt == max_retries - 1:
                 log_data = getattr(request, 'log_data', {})
@@ -116,13 +128,10 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
                 save_log(log_data)
                 return make_response({'error': 'Service unavailable'}, 503)
             else:
-                time.sleep(delay)  # Espera antes de reintentar
-
-    # Si después de reintentos sigue fallando
+                time.sleep(delay)
     return make_response({'error': 'Service unavailable after retries'}, 503)
 
-
+# Iniciar servidor
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
-
