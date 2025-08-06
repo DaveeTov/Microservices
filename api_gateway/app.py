@@ -1,7 +1,9 @@
-import time
 import json
-import requests
+import time
 from datetime import datetime
+
+import jwt  # <- Asegúrate de tener esto instalado: pip install pyjwt
+import requests
 from flask import Flask, make_response, request
 from flask_cors import CORS
 
@@ -15,6 +17,12 @@ CORS(app,
      supports_credentials=True,
      allow_headers=["Content-Type", "Authorization"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+
+# --------------------------
+# Clave secreta compartida con el microservicio de auth
+# --------------------------
+SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
+JWT_ALGORITHM = 'HS256'
 
 # --------------------------
 # Función para guardar logs como JSON
@@ -32,10 +40,18 @@ def log_request():
     request.start_time = time.time()
     json_payload = request.get_json(silent=True)
 
-    # Identificación del usuario: Authorization o JSON
+    # Obtener usuario del token JWT o del cuerpo
     usuario = None
-    if "Authorization" in request.headers:
-        usuario = request.headers.get("Authorization")
+    token = request.headers.get("Authorization")
+    
+    if token and token.startswith("Bearer "):
+        try:
+            decoded = jwt.decode(token[7:], SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            usuario = decoded.get("username") or decoded.get("email") or "desconocido"
+        except jwt.ExpiredSignatureError:
+            usuario = "token expirado"
+        except jwt.InvalidTokenError:
+            usuario = "token inválido"
     elif isinstance(json_payload, dict) and 'email' in json_payload:
         usuario = json_payload['email']
 
