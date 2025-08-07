@@ -13,27 +13,22 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-# ✅ CORRIGIENDO PATHS - Base de datos compartida entre servicios
+# ✅ CONFIGURACIÓN DE BASE DE DATOS
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-# Subir un nivel para compartir BD entre todos los servicios
 SHARED_DB_DIR = os.path.join(BASE_DIR, '..', 'shared_data')
-os.makedirs(SHARED_DB_DIR, exist_ok=True)  # Crear directorio si no existe
+os.makedirs(SHARED_DB_DIR, exist_ok=True)
 DB_NAME = os.path.join(SHARED_DB_DIR, 'main_database.db')
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 
-# ✅ FUNCIÓN MEJORADA DE INICIALIZACIÓN DE BD COMPARTIDA
 def init_db():
     """Inicializa la base de datos compartida con todas las tablas necesarias"""
-    # Verificar si la BD ya existe
-    db_exists = os.path.exists(DB_NAME)
-    
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
             
-            # ✅ TABLA DE USUARIOS
+            # Tabla de usuarios
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +45,7 @@ def init_db():
                 )
             ''')
             
-            # ✅ TABLA DE TAREAS (para el task service)
+            # Tabla de tareas
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,80 +62,90 @@ def init_db():
                 )
             ''')
             
-            # Verificar si hay datos
-            cursor.execute("SELECT COUNT(*) FROM users")
-            user_count = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM tasks")
-            task_count = cursor.fetchone()[0]
-            
-            if not db_exists:
-                print(f"✅ Base de datos compartida creada: {DB_NAME}")
-            else:
-                print(f"✅ Base de datos compartida encontrada: {DB_NAME}")
-                print(f"   - Usuarios: {user_count}")
-                print(f"   - Tareas: {task_count}")
-                
             conn.commit()
+            print(f"✅ Auth Service: Base de datos inicializada en {DB_NAME}")
+            
     except Exception as e:
-        print(f"❌ Error inicializando BD compartida: {e}")
+        print(f"❌ Error inicializando BD: {e}")
 
-
-# ✅ FUNCIÓN PARA OBTENER TIEMPO UTC CONSISTENTE
 def get_utc_now():
-    """Obtiene el tiempo actual en UTC de forma consistente"""
+    """Obtiene el tiempo actual en UTC"""
     return datetime.now(timezone.utc)
 
+def handle_db_error(operation, error):
+    """Manejo centralizado de errores de base de datos"""
+    print(f"❌ Error en {operation}: {error}")
+    if "database is locked" in str(error).lower():
+        return {"error": "Database temporarily unavailable, please try again"}, 503
+    elif "constraint" in str(error).lower():
+        return {"error": "Data constraint violation"}, 400
+    else:
+        return {"error": "Internal server error"}, 500
 
-# ✅ FUNCIÓN PARA CONVERTIR TIMESTAMP DE CLIENTE
-def parse_client_time(client_timestamp):
-    """
-    Convierte timestamp del cliente a UTC
-    Acepta tanto timestamps Unix como strings ISO
-    """
-    try:
-        if isinstance(client_timestamp, (int, float)):
-            # Timestamp Unix
-            return datetime.fromtimestamp(client_timestamp, tz=timezone.utc)
-        elif isinstance(client_timestamp, str):
-            # String ISO con timezone
-            if client_timestamp.endswith('Z'):
-                return datetime.fromisoformat(client_timestamp.replace('Z', '+00:00'))
-            else:
-                return datetime.fromisoformat(client_timestamp)
-        else:
-            return get_utc_now()
-    except:
-        return get_utc_now()
-
+# RUTAS DE LA API
 
 @app.route('/')
 def home():
-    return jsonify({"status": "Auth service activo"}), 200
-
+    return jsonify({
+        "status": "Auth service activo",
+        "timestamp": get_utc_now().isoformat(),
+        "version": "1.0.0"
+    }), 200
 
 @app.route('/health')
 def health_check():
-    return jsonify({"status": "ok"}), 200
-
+    try:
+        # Verificar conexión a la base de datos
+        with sqlite3.connect(DB_NAME, timeout=5) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        
+        return jsonify({
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": get_utc_now().isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "database": "error",
+            "error": str(e),
+            "timestamp": get_utc_now().isoformat()
+        }), 503
 
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.get_json()
-
-    required_fields = ['username', 'password', 'email', 'birthdate', 'secret_question', 'secret_answer']
-    if not all(field in data for field in required_fields):
-        return jsonify({'error': 'Faltan campos requeridos'}), 400
-
-    if len(data['password']) < 6:
-        return jsonify({'error': 'La contraseña debe tener al menos 6 caracteres'}), 400
-
-    hashed_password = generate_password_hash(data['password'])
-    mfa_secret = pyotp.random_base32()
-    current_time = get_utc_now().isoformat()
-
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No se recibieron datos'}), 400
+
+        # Validar campos requeridos
+        required_fields = ['username', 'password', 'email', 'birthdate', 'secret_question', 'secret_answer']
+        missing_fields = [field for field in required_fields if not data.get(field)]
+        
+        if missing_fields:
+            return jsonify({
+                'error': 'Faltan campos requeridos',
+                'missing_fields': missing_fields
+            }), 400
+
+        # Validaciones adicionales
+        if len(data['password']) < 6:
+            return jsonify({'error': 'La contraseña debe tener al menos 6 caracteres'}), 400
+
+        if '@' not in data['email']:
+            return jsonify({'error': 'Email inválido'}), 400
+
+        # Procesar datos
+        hashed_password = generate_password_hash(data['password'])
+        mfa_secret = pyotp.random_base32()
+        current_time = get_utc_now().isoformat()
+
+        # Insertar en base de datos con timeout
+        with sqlite3.connect(DB_NAME, timeout=10) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO users (
@@ -149,12 +154,12 @@ def register():
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                data['username'],
+                data['username'].strip(),
                 hashed_password,
-                data['email'],
+                data['email'].strip().lower(),
                 data['birthdate'],
-                data['secret_question'],
-                data['secret_answer'],
+                data['secret_question'].strip(),
+                data['secret_answer'].strip(),
                 mfa_secret,
                 current_time,
                 current_time
@@ -162,130 +167,145 @@ def register():
             conn.commit()
             user_id = cursor.lastrowid
 
-        # Generar QR para MFA (¡correcto!)
+        # Generar QR para MFA
         otp_url = pyotp.TOTP(mfa_secret).provisioning_uri(
             name=data['username'],
-            issuer_name="MiAppSegura"
+            issuer_name="TaskManager"
         )
+        
         buffer = io.BytesIO()
-        qrcode.make(otp_url).save(buffer)
+        qrcode.make(otp_url).save(buffer, format='PNG')
         img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
-        # 🚩 🚩 SOLO ESTO: siempre devuelve un dict
         return jsonify({
+            'success': True,
             'message': 'Usuario registrado correctamente',
-            'qrCodeUrl': f"data:image/png;base64,{img_base64}",
-            'user_id': user_id,
-            'server_time': get_utc_now().isoformat()
+            'data': {
+                'user_id': user_id,
+                'username': data['username'],
+                'email': data['email'],
+                'qrCodeUrl': f"data:image/png;base64,{img_base64}"
+            },
+            'server_time': current_time
         }), 201
 
     except sqlite3.IntegrityError as e:
-        if "username" in str(e):
-            return jsonify({'error': 'Nombre de usuario ya existe'}), 409
-        elif "email" in str(e):
-            return jsonify({'error': 'Email ya existe'}), 409
+        if "username" in str(e).lower():
+            return jsonify({'error': 'El nombre de usuario ya existe'}), 409
+        elif "email" in str(e).lower():
+            return jsonify({'error': 'El email ya está registrado'}), 409
         else:
             return jsonify({'error': 'Datos duplicados'}), 409
+    
+    except sqlite3.Error as e:
+        error_response = handle_db_error("register", e)
+        return jsonify(error_response[0]), error_response[1]
+    
     except Exception as e:
-        print(f"❌ Error inesperado en /register: {e}")
+        print(f"❌ Error inesperado en register: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
-
-
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-
-    if not data:
-        return jsonify({'error': 'No se recibieron datos'}), 400
-
-    username = data.get('username')
-    password = data.get('password')
-    client_time = data.get('client_time')  # Tiempo del cliente para sincronización
-
-    if not username or not password:
-        return jsonify({'error': 'Usuario y contraseña son requeridos'}), 400
-
-    print(f"🔍 Intentando login para usuario: {username}")
-
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No se recibieron datos'}), 400
+
+        username = data.get('username', '').strip()
+        password = data.get('password', '')
+        
+        if not username or not password:
+            return jsonify({'error': 'Usuario y contraseña son requeridos'}), 400
+
+        print(f"🔍 Intento de login para: {username}")
+
+        # Buscar usuario
+        with sqlite3.connect(DB_NAME, timeout=10) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users WHERE username = ? AND status = 'active'", (username,))
+            cursor.execute(
+                "SELECT id, username, password, email, status FROM users WHERE username = ?", 
+                (username,)
+            )
             user = cursor.fetchone()
 
         if not user:
-            print(f"❌ Usuario {username} no encontrado o inactivo")
+            print(f"❌ Usuario {username} no encontrado")
+            time.sleep(1)  # Prevenir timing attacks
             return jsonify({'error': 'Credenciales incorrectas'}), 401
 
-        if not check_password_hash(user[2], password):
-            print(f"❌ Contraseña incorrecta para usuario {username}")
+        user_id, db_username, db_password, email, status = user
+
+        if status != 'active':
+            return jsonify({'error': 'Usuario inactivo'}), 403
+
+        if not check_password_hash(db_password, password):
+            print(f"❌ Contraseña incorrecta para {username}")
+            time.sleep(1)  # Prevenir timing attacks
             return jsonify({'error': 'Credenciales incorrectas'}), 401
 
-        print(f"✅ Credenciales válidas para usuario {username}")
+        print(f"✅ Credenciales válidas para {username}")
 
+        # Generar token temporal
         current_utc = get_utc_now()
         temp_token = jwt.encode({
-            'id': user[0],
-            'username': user[1],
+            'id': user_id,
+            'username': db_username,
+            'email': email,
             'temp': True,
-            'exp': int((current_utc + timedelta(minutes=10)).timestamp())
-          
+            'exp': int((current_utc + timedelta(minutes=10)).timestamp()),
+            'iat': int(current_utc.timestamp())
         }, SECRET_KEY, algorithm='HS256')
 
-        print(f"🕒 Token temporal generado para usuario {username}")
-
         return jsonify({
-            'message': 'OTP requerido',
-            'tempToken': temp_token,
-            'server_time': current_utc.isoformat(),
-            'sync_info': {
-                'server_utc': current_utc.isoformat(),
-                'unix_timestamp': int(current_utc.timestamp())
-            }
+            'success': True,
+            'message': 'Credenciales válidas - se requiere código OTP',
+            'data': {
+                'tempToken': temp_token,
+                'requires_otp': True,
+                'user': {
+                    'id': user_id,
+                    'username': db_username,
+                    'email': email
+                }
+            },
+            'server_time': current_utc.isoformat()
         }), 200
 
+    except sqlite3.Error as e:
+        error_response = handle_db_error("login", e)
+        return jsonify(error_response[0]), error_response[1]
+    
     except Exception as e:
         print(f"❌ Error en login: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-
-@app.route('/server-time', methods=['GET'])
-def server_time():
-    """
-    Devuelve el tiempo actual del servidor en UTC para sincronización
-    """
-    current_utc = get_utc_now()
-    unix_timestamp = int(current_utc.timestamp())
-    
-    return jsonify({
-        "server_utc": current_utc.isoformat(),
-        "unix_timestamp": unix_timestamp,
-        "timezone": "UTC",
-        "iso_format": current_utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    }), 200
-
-
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
-    """
-    Verifica el código OTP con tolerancia de tiempo mejorada
-    """
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({'error': 'No se recibieron datos'}), 400
-    
-    temp_token = data.get('tempToken')
-    otp_code = data.get('otpCode')
-    client_time = data.get('client_time')
-    
-    if not temp_token or not otp_code:
-        return jsonify({'error': 'Token temporal y código OTP son requeridos'}), 400
-    
     try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No se recibieron datos'}), 400
+        
+        temp_token = data.get('tempToken')
+        otp_code = data.get('otpCode', '').strip()
+        
+        if not temp_token or not otp_code:
+            return jsonify({'error': 'Token temporal y código OTP son requeridos'}), 400
+
+        # Validar formato del código OTP
+        if not otp_code.isdigit() or len(otp_code) != 6:
+            return jsonify({'error': 'El código OTP debe ser de 6 dígitos'}), 400
+
         # Decodificar token temporal
-        decoded_token = jwt.decode(temp_token, SECRET_KEY, algorithms=['HS256'])
+        try:
+            decoded_token = jwt.decode(temp_token, SECRET_KEY, algorithms=['HS256'])
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token temporal expirado. Vuelve a iniciar sesión'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Token temporal inválido'}), 401
         
         if not decoded_token.get('temp'):
             return jsonify({'error': 'Token inválido'}), 401
@@ -293,10 +313,13 @@ def verify_otp():
         user_id = decoded_token['id']
         username = decoded_token['username']
         
-        # Obtener el secreto MFA del usuario
-        with sqlite3.connect(DB_NAME) as conn:
+        # Obtener secreto MFA
+        with sqlite3.connect(DB_NAME, timeout=10) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT mfa_secret, status FROM users WHERE id = ?", (user_id,))
+            cursor.execute(
+                "SELECT mfa_secret, status FROM users WHERE id = ?", 
+                (user_id,)
+            )
             user = cursor.fetchone()
         
         if not user or not user[0]:
@@ -306,37 +329,31 @@ def verify_otp():
             return jsonify({'error': 'Usuario inactivo'}), 403
         
         mfa_secret = user[0]
-        totp = pyotp.TOTP(mfa_secret)
         
-        # ✅ VALIDACIÓN MEJORADA CON TOLERANCIA AMPLIA
+        # Verificar OTP con tolerancia de tiempo
+        totp = pyotp.TOTP(mfa_secret)
         current_time = int(get_utc_now().timestamp())
         
-        # Probar con ventana de tolerancia amplia (±2 ventanas = ±60 segundos)
         is_valid = False
-        for window in range(-2, 3):  # -2, -1, 0, 1, 2
-            test_time = current_time + (window * 30)  # Cada ventana son 30 segundos
-            expected_code = pyotp.TOTP(mfa_secret).at(test_time)
+        # Probar con ventana de tolerancia (±2 intervalos = ±60 segundos)
+        for window in range(-2, 3):
+            test_time = current_time + (window * 30)
+            expected_code = totp.at(test_time)
             if expected_code == otp_code:
                 is_valid = True
-                print(f"✅ Código OTP válido en ventana {window} para usuario {username}")
+                print(f"✅ Código OTP válido en ventana {window} para {username}")
                 break
         
         if not is_valid:
-            # Información de debug (remover en producción)
-            current_code = totp.now()
-            print(f"❌ Código OTP inválido para usuario {username}")
-            print(f"Código recibido: {otp_code}, Código actual: {current_code}")
+            print(f"❌ Código OTP inválido para {username}. Código: {otp_code}")
             return jsonify({
                 'error': 'Código OTP inválido',
-                'debug_info': {
-                    'server_time': get_utc_now().isoformat(),
-                    'current_code': current_code  # Solo para debugging
-                }
+                'message': 'Verifica que tu dispositivo tenga la hora correcta'
             }), 401
         
         # Actualizar último acceso
         current_utc = get_utc_now()
-        with sqlite3.connect(DB_NAME) as conn:
+        with sqlite3.connect(DB_NAME, timeout=5) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE users SET updated_at = ? WHERE id = ?", 
@@ -344,80 +361,100 @@ def verify_otp():
             )
             conn.commit()
         
-        # Generar token JWT final (válido por 24 horas)
+        # Generar token JWT final
         final_token = jwt.encode({
             'id': user_id,
             'username': username,
-            'exp': current_utc + timedelta(hours=24),
-            'issued_at': current_utc.isoformat()
+            'email': decoded_token.get('email'),
+            'exp': int((current_utc + timedelta(hours=24)).timestamp()),
+            'iat': int(current_utc.timestamp())
         }, SECRET_KEY, algorithm='HS256')
         
-        print(f"✅ Login exitoso para usuario {username}")
+        print(f"✅ Login exitoso para {username}")
         
         return jsonify({
+            'success': True,
             'message': 'Autenticación exitosa',
-            'token': final_token,
-            'user': {
-                'id': user_id,
-                'username': username
+            'data': {
+                'token': final_token,
+                'user': {
+                    'id': user_id,
+                    'username': username,
+                    'email': decoded_token.get('email')
+                },
+                'expires_in': 86400  # 24 horas en segundos
             },
             'server_time': current_utc.isoformat()
         }), 200
         
-    except jwt.ExpiredSignatureError:
-        return jsonify({'error': 'Token temporal expirado. Vuelve a iniciar sesión'}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({'error': 'Token temporal inválido'}), 401
+    except sqlite3.Error as e:
+        error_response = handle_db_error("verify-otp", e)
+        return jsonify(error_response[0]), error_response[1]
+    
     except Exception as e:
         print(f"❌ Error en verify-otp: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
+@app.route('/server-time', methods=['GET'])
+def server_time():
+    """Devuelve el tiempo actual del servidor para sincronización"""
+    current_utc = get_utc_now()
+    
+    return jsonify({
+        "server_utc": current_utc.isoformat(),
+        "unix_timestamp": int(current_utc.timestamp()),
+        "timezone": "UTC"
+    }), 200
 
-@app.route('/generate-test-otp', methods=['POST'])
-def generate_test_otp():
-    """
-    Genera un código OTP para el usuario (solo para testing/debug)
-    REMOVER EN PRODUCCIÓN
-    """
-    data = request.get_json()
-    username = data.get('username')
-    
-    if not username:
-        return jsonify({'error': 'Username requerido'}), 400
-    
+@app.route('/validate-token', methods=['POST'])
+def validate_token():
+    """Valida un token JWT"""
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT mfa_secret FROM users WHERE username = ?", (username,))
-            user = cursor.fetchone()
+        data = request.get_json()
+        token = data.get('token') if data else None
         
-        if not user or not user[0]:
-            return jsonify({'error': 'Usuario no encontrado'}), 404
+        if not token:
+            # Intentar obtener del header Authorization
+            auth_header = request.headers.get('Authorization')
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header.split(' ')[1]
         
-        mfa_secret = user[0]
-        totp = pyotp.TOTP(mfa_secret)
-        current_utc = get_utc_now()
-        current_otp = totp.now()
+        if not token:
+            return jsonify({'error': 'Token requerido'}), 400
         
-        return jsonify({
-            'current_otp': current_otp,
-            'server_time': current_utc.isoformat(),
-            'unix_timestamp': int(current_utc.timestamp()),
-            'message': 'Código generado (solo para testing)',
-            'warning': 'REMOVER EN PRODUCCIÓN'
-        }), 200
-        
+        try:
+            decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+            
+            # Verificar que no sea un token temporal
+            if decoded.get('temp'):
+                return jsonify({'error': 'Token temporal no válido para esta operación'}), 401
+            
+            return jsonify({
+                'success': True,
+                'valid': True,
+                'data': {
+                    'user_id': decoded.get('id'),
+                    'username': decoded.get('username'),
+                    'email': decoded.get('email'),
+                    'exp': decoded.get('exp'),
+                    'iat': decoded.get('iat')
+                }
+            }), 200
+            
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token expirado'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Token inválido'}), 401
+            
     except Exception as e:
-        print(f"❌ Error generando OTP de prueba: {e}")
+        print(f"❌ Error validando token: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-
-# ✅ NUEVA RUTA: Verificar estado de la base de datos
 @app.route('/db-status', methods=['GET'])
 def db_status():
     """Información sobre el estado de la base de datos"""
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with sqlite3.connect(DB_NAME, timeout=5) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM users")
             user_count = cursor.fetchone()[0]
@@ -426,10 +463,13 @@ def db_status():
             tables = [row[0] for row in cursor.fetchall()]
         
         return jsonify({
-            'database_path': DB_NAME,
-            'database_exists': os.path.exists(DB_NAME),
-            'user_count': user_count,
-            'tables': tables,
+            'success': True,
+            'data': {
+                'database_path': DB_NAME,
+                'database_exists': os.path.exists(DB_NAME),
+                'user_count': user_count,
+                'tables': tables
+            },
             'server_time': get_utc_now().isoformat()
         }), 200
         
@@ -440,21 +480,29 @@ def db_status():
             'database_exists': os.path.exists(DB_NAME)
         }), 500
 
+# Manejo de errores global
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        'error': 'Endpoint not found',
+        'path': request.path,
+        'method': request.method
+    }), 404
 
-# ✅ INICIALIZACIÓN AL ARRANCAR
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        'error': 'Internal server error'
+    }), 500
+
+# Inicialización
 print(f"🚀 Iniciando Auth Service...")
 print(f"📁 Directorio base: {BASE_DIR}")
 print(f"🗃️ Base de datos: {DB_NAME}")
 
-# Inicializar BD al arrancar
 init_db()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
-    print(f"🌐 Servidor corriendo en puerto {port}")
+    print(f"🌐 Auth Service corriendo en puerto {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
-
-
-
-
-
