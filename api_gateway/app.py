@@ -113,13 +113,18 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
             )
             content_type = resp.headers.get('Content-Type', '').lower()
 
-            # ✅ Maneja JSON puro como texto, no binario
             if resp.status_code != 503:
+                # ✅ PARA JSON: SIEMPRE COMO TEXTO
                 if 'application/json' in content_type:
-                    # Usa resp.text para JSON, NO resp.content
                     return Response(resp.text, status=resp.status_code, content_type='application/json')
+                # Para imágenes puras, etc:
+                elif content_type.startswith('image/'):
+                    return Response(resp.content, status=resp.status_code, content_type=content_type)
+                # Otros textos: como texto plano
+                elif content_type.startswith('text/'):
+                    return Response(resp.text, status=resp.status_code, content_type=content_type)
+                # Fallback: como binario
                 else:
-                    # Otros tipos de contenido
                     return Response(resp.content, status=resp.status_code, content_type=content_type or 'application/octet-stream')
             else:
                 logging.warning(f"⚠️ Servicio 503: {url}")
@@ -138,6 +143,8 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
             time.sleep(delay)
     return make_response({'error': 'Service unavailable after retries'}, 503)
 
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+
