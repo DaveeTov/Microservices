@@ -6,7 +6,7 @@ from datetime import datetime
 
 import jwt
 import requests
-from flask import Flask, make_response, request
+from flask import Flask, make_response, request, Response
 from flask_cors import CORS
 
 # Configuración de logging
@@ -68,7 +68,7 @@ def log_response(response):
     save_log(log_data)
     return response
 
-# 🔗 URLs de los servicios (definidos por variable de entorno o por defecto usando Render)
+# 🔗 URLs de los servicios (puedes cambiarlas por variables de entorno en Render)
 AUTH_SERVICE_URL = os.environ.get("AUTH_SERVICE_URL", "https://auth-service-75ux.onrender.com")
 USER_SERVICE_URL = os.environ.get("USER_SERVICE_URL", "https://user-service-6hc6.onrender.com")
 TASK_SERVICE_URL = os.environ.get("TASK_SERVICE_URL", "https://task-service-v5ke.onrender.com")
@@ -111,10 +111,24 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
                 headers={k: v for k, v in request.headers if k.lower() != 'host'},
                 timeout=30
             )
+            content_type = resp.headers.get('Content-Type', '').lower()
+
+            # Si es JSON o algo parecido, responde como JSON
             if resp.status_code != 503:
-                response = make_response(resp.content, resp.status_code)
-                response.headers['Content-Type'] = resp.headers.get('Content-Type', 'application/json')
-                return response
+                if 'application/json' in content_type or resp.text.startswith('{') or resp.text.startswith('['):
+                    try:
+                        # Si ya es dict, serializa
+                        if isinstance(resp.content, bytes):
+                            data = resp.json()
+                            return Response(json.dumps(data), status=resp.status_code, content_type='application/json')
+                        else:
+                            return Response(resp.text, status=resp.status_code, content_type='application/json')
+                    except Exception:
+                        # Fallback si el header está bien pero no es JSON válido
+                        return Response(resp.text, status=resp.status_code, content_type='application/json')
+                else:
+                    # Si el content-type es incorrecto, pero la respuesta es texto (por ejemplo, error HTML)
+                    return Response(resp.text, status=resp.status_code, content_type=content_type or 'text/plain')
             else:
                 logging.warning(f"⚠️ Servicio 503: {url}")
                 time.sleep(delay)
@@ -135,4 +149,3 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
-
