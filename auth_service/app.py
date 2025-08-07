@@ -3,6 +3,7 @@ import io
 import os
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 
 import jwt
 import pyotp
@@ -10,32 +11,107 @@ import qrcode
 from flask import Flask, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 from flask_cors import CORS
-from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-DB_NAME = os.path.join(BASE_DIR, 'main_database.db')
+# ✅ CORRIGIENDO PATHS - Base de datos compartida entre servicios
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+# Subir un nivel para compartir BD entre todos los servicios
+SHARED_DB_DIR = os.path.join(BASE_DIR, '..', 'shared_data')
+os.makedirs(SHARED_DB_DIR, exist_ok=True)  # Crear directorio si no existe
+DB_NAME = os.path.join(SHARED_DB_DIR, 'main_database.db')
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 
-
+# ✅ FUNCIÓN MEJORADA DE INICIALIZACIÓN DE BD COMPARTIDA
 def init_db():
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL,
-                email TEXT,
-                birthdate TEXT,
-                secret_question TEXT,
-                secret_answer TEXT,
-                mfa_secret TEXT,
-                status TEXT DEFAULT 'active'
-            )
-        ''')
+    """Inicializa la base de datos compartida con todas las tablas necesarias"""
+    # Verificar si la BD ya existe
+    db_exists = os.path.exists(DB_NAME)
+    
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            
+            # ✅ TABLA DE USUARIOS
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    birthdate TEXT,
+                    secret_question TEXT,
+                    secret_answer TEXT,
+                    mfa_secret TEXT,
+                    status TEXT DEFAULT 'active',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # ✅ TABLA DE TAREAS (para el task service)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    create_at TIMESTAMP NOT NULL,
+                    deadline TIMESTAMP,
+                    status TEXT CHECK(status IN ('InProgress', 'Revision', 'Completed', 'Paused')) NOT NULL DEFAULT 'InProgress',
+                    isAlive INTEGER NOT NULL DEFAULT 1,
+                    created_by INTEGER NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    priority TEXT CHECK(priority IN ('Low', 'Medium', 'High', 'Critical')) DEFAULT 'Medium',
+                    FOREIGN KEY (created_by) REFERENCES users(id)
+                )
+            ''')
+            
+            # Verificar si hay datos
+            cursor.execute("SELECT COUNT(*) FROM users")
+            user_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM tasks")
+            task_count = cursor.fetchone()[0]
+            
+            if not db_exists:
+                print(f"✅ Base de datos compartida creada: {DB_NAME}")
+            else:
+                print(f"✅ Base de datos compartida encontrada: {DB_NAME}")
+                print(f"   - Usuarios: {user_count}")
+                print(f"   - Tareas: {task_count}")
+                
+            conn.commit()
+    except Exception as e:
+        print(f"❌ Error inicializando BD compartida: {e}")
+
+
+# ✅ FUNCIÓN PARA OBTENER TIEMPO UTC CONSISTENTE
+def get_utc_now():
+    """Obtiene el tiempo actual en UTC de forma consistente"""
+    return datetime.now(timezone.utc)
+
+
+# ✅ FUNCIÓN PARA CONVERTIR TIMESTAMP DE CLIENTE
+def parse_client_time(client_timestamp):
+    """
+    Convierte timestamp del cliente a UTC
+    Acepta tanto timestamps Unix como strings ISO
+    """
+    try:
+        if isinstance(client_timestamp, (int, float)):
+            # Timestamp Unix
+            return datetime.fromtimestamp(client_timestamp, tz=timezone.utc)
+        elif isinstance(client_timestamp, str):
+            # String ISO con timezone
+            if client_timestamp.endswith('Z'):
+                return datetime.fromisoformat(client_timestamp.replace('Z', '+00:00'))
+            else:
+                return datetime.fromisoformat(client_timestamp)
+        else:
+            return get_utc_now()
+    except:
+        return get_utc_now()
 
 
 @app.route('/')
@@ -54,10 +130,15 @@ def register():
 
     required_fields = ['username', 'password', 'email', 'birthdate', 'secret_question', 'secret_answer']
     if not all(field in data for field in required_fields):
-        return jsonify({'error': 'Faltan campos'}), 400
+        return jsonify({'error': 'Faltan campos requeridos'}), 400
+
+    # Validaciones básicas
+    if len(data['password']) < 6:
+        return jsonify({'error': 'La contraseña debe tener al menos 6 caracteres'}), 400
 
     hashed_password = generate_password_hash(data['password'])
     mfa_secret = pyotp.random_base32()
+    current_time = get_utc_now().isoformat()
 
     try:
         with sqlite3.connect(DB_NAME) as conn:
@@ -65,8 +146,9 @@ def register():
             cursor.execute("""
                 INSERT INTO users (
                     username, password, email, birthdate,
-                    secret_question, secret_answer, mfa_secret
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    secret_question, secret_answer, mfa_secret,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data['username'],
                 hashed_password,
@@ -74,13 +156,17 @@ def register():
                 data['birthdate'],
                 data['secret_question'],
                 data['secret_answer'],
-                mfa_secret
+                mfa_secret,
+                current_time,
+                current_time
             ))
             conn.commit()
             user_id = cursor.lastrowid
 
+        # Generar QR para MFA
         otp_url = pyotp.TOTP(mfa_secret).provisioning_uri(
-            name=data['username'], issuer_name="MiAppSegura"
+            name=data['username'], 
+            issuer_name="MiAppSegura"
         )
 
         buffer = io.BytesIO()
@@ -90,11 +176,17 @@ def register():
         return jsonify({
             'message': 'Usuario registrado correctamente',
             'qrCodeUrl': f"data:image/png;base64,{img_base64}",
-            'user_id': user_id
+            'user_id': user_id,
+            'server_time': get_utc_now().isoformat()
         }), 201
 
-    except sqlite3.IntegrityError:
-        return jsonify({'error': 'Nombre de usuario ya existe'}), 409
+    except sqlite3.IntegrityError as e:
+        if "username" in str(e):
+            return jsonify({'error': 'Nombre de usuario ya existe'}), 409
+        elif "email" in str(e):
+            return jsonify({'error': 'Email ya existe'}), 409
+        else:
+            return jsonify({'error': 'Datos duplicados'}), 409
     except Exception as e:
         print(f"❌ Error inesperado en /register: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
@@ -109,6 +201,7 @@ def login():
 
     username = data.get('username')
     password = data.get('password')
+    client_time = data.get('client_time')  # Tiempo del cliente para sincronización
 
     if not username or not password:
         return jsonify({'error': 'Usuario y contraseña son requeridos'}), 400
@@ -118,11 +211,11 @@ def login():
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+            cursor.execute("SELECT * FROM users WHERE username = ? AND status = 'active'", (username,))
             user = cursor.fetchone()
 
         if not user:
-            print(f"❌ Usuario {username} no encontrado")
+            print(f"❌ Usuario {username} no encontrado o inactivo")
             return jsonify({'error': 'Credenciales incorrectas'}), 401
 
         if not check_password_hash(user[2], password):
@@ -131,18 +224,24 @@ def login():
 
         print(f"✅ Credenciales válidas para usuario {username}")
 
+        current_utc = get_utc_now()
         temp_token = jwt.encode({
             'id': user[0],
             'username': user[1],
             'temp': True,
-            'exp': datetime.utcnow() + timedelta(minutes=5)
+            'exp': current_utc + timedelta(minutes=10)  # Más tiempo para OTP
         }, SECRET_KEY, algorithm='HS256')
 
         print(f"🕒 Token temporal generado para usuario {username}")
 
         return jsonify({
             'message': 'OTP requerido',
-            'tempToken': temp_token
+            'tempToken': temp_token,
+            'server_time': current_utc.isoformat(),
+            'sync_info': {
+                'server_utc': current_utc.isoformat(),
+                'unix_timestamp': int(current_utc.timestamp())
+            }
         }), 200
 
     except Exception as e:
@@ -150,29 +249,26 @@ def login():
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-# ✨ NUEVA RUTA: Obtener tiempo del servidor
 @app.route('/server-time', methods=['GET'])
 def server_time():
     """
-    Devuelve el tiempo actual del servidor en UTC y timestamp Unix
-    para sincronización con el cliente
+    Devuelve el tiempo actual del servidor en UTC para sincronización
     """
-    current_utc = datetime.utcnow()
-    unix_timestamp = int(time.time())
+    current_utc = get_utc_now()
+    unix_timestamp = int(current_utc.timestamp())
     
     return jsonify({
-        "server_utc": current_utc.isoformat() + "Z",
+        "server_utc": current_utc.isoformat(),
         "unix_timestamp": unix_timestamp,
-        "timezone": "UTC"
+        "timezone": "UTC",
+        "iso_format": current_utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     }), 200
 
 
-# ✨ NUEVA RUTA: Validar OTP con tolerancia de tiempo
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
     """
-    Verifica el código OTP con tolerancia de tiempo
-    Acepta códigos de la ventana anterior y siguiente (±30 segundos)
+    Verifica el código OTP con tolerancia de tiempo mejorada
     """
     data = request.get_json()
     
@@ -181,6 +277,7 @@ def verify_otp():
     
     temp_token = data.get('tempToken')
     otp_code = data.get('otpCode')
+    client_time = data.get('client_time')
     
     if not temp_token or not otp_code:
         return jsonify({'error': 'Token temporal y código OTP son requeridos'}), 400
@@ -198,28 +295,60 @@ def verify_otp():
         # Obtener el secreto MFA del usuario
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT mfa_secret FROM users WHERE id = ?", (user_id,))
+            cursor.execute("SELECT mfa_secret, status FROM users WHERE id = ?", (user_id,))
             user = cursor.fetchone()
         
         if not user or not user[0]:
             return jsonify({'error': 'Usuario no encontrado o sin MFA configurado'}), 404
+            
+        if user[1] != 'active':
+            return jsonify({'error': 'Usuario inactivo'}), 403
         
         mfa_secret = user[0]
         totp = pyotp.TOTP(mfa_secret)
         
-        # ✨ CLAVE: Validar con tolerancia de tiempo
-        # valid_window=1 permite códigos de ±30 segundos
-        is_valid = totp.verify(otp_code, valid_window=1)
+        # ✅ VALIDACIÓN MEJORADA CON TOLERANCIA AMPLIA
+        current_time = int(get_utc_now().timestamp())
+        
+        # Probar con ventana de tolerancia amplia (±2 ventanas = ±60 segundos)
+        is_valid = False
+        for window in range(-2, 3):  # -2, -1, 0, 1, 2
+            test_time = current_time + (window * 30)  # Cada ventana son 30 segundos
+            expected_code = pyotp.TOTP(mfa_secret).at(test_time)
+            if expected_code == otp_code:
+                is_valid = True
+                print(f"✅ Código OTP válido en ventana {window} para usuario {username}")
+                break
         
         if not is_valid:
-            print(f"❌ Código OTP inválido para usuario {username}. Código: {otp_code}")
-            return jsonify({'error': 'Código OTP inválido'}), 401
+            # Información de debug (remover en producción)
+            current_code = totp.now()
+            print(f"❌ Código OTP inválido para usuario {username}")
+            print(f"Código recibido: {otp_code}, Código actual: {current_code}")
+            return jsonify({
+                'error': 'Código OTP inválido',
+                'debug_info': {
+                    'server_time': get_utc_now().isoformat(),
+                    'current_code': current_code  # Solo para debugging
+                }
+            }), 401
+        
+        # Actualizar último acceso
+        current_utc = get_utc_now()
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET updated_at = ? WHERE id = ?", 
+                (current_utc.isoformat(), user_id)
+            )
+            conn.commit()
         
         # Generar token JWT final (válido por 24 horas)
         final_token = jwt.encode({
             'id': user_id,
             'username': username,
-            'exp': datetime.utcnow() + timedelta(hours=24)
+            'exp': current_utc + timedelta(hours=24),
+            'issued_at': current_utc.isoformat()
         }, SECRET_KEY, algorithm='HS256')
         
         print(f"✅ Login exitoso para usuario {username}")
@@ -230,11 +359,12 @@ def verify_otp():
             'user': {
                 'id': user_id,
                 'username': username
-            }
+            },
+            'server_time': current_utc.isoformat()
         }), 200
         
     except jwt.ExpiredSignatureError:
-        return jsonify({'error': 'Token temporal expirado'}), 401
+        return jsonify({'error': 'Token temporal expirado. Vuelve a iniciar sesión'}), 401
     except jwt.InvalidTokenError:
         return jsonify({'error': 'Token temporal inválido'}), 401
     except Exception as e:
@@ -242,12 +372,11 @@ def verify_otp():
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-# ✨ NUEVA RUTA: Generar código OTP manualmente para pruebas
 @app.route('/generate-test-otp', methods=['POST'])
 def generate_test_otp():
     """
     Genera un código OTP para el usuario (solo para testing/debug)
-    NO usar en producción sin autenticación adecuada
+    REMOVER EN PRODUCCIÓN
     """
     data = request.get_json()
     username = data.get('username')
@@ -266,12 +395,15 @@ def generate_test_otp():
         
         mfa_secret = user[0]
         totp = pyotp.TOTP(mfa_secret)
+        current_utc = get_utc_now()
         current_otp = totp.now()
         
         return jsonify({
             'current_otp': current_otp,
-            'server_time': datetime.utcnow().isoformat() + "Z",
-            'message': 'Código generado (solo para testing)'
+            'server_time': current_utc.isoformat(),
+            'unix_timestamp': int(current_utc.timestamp()),
+            'message': 'Código generado (solo para testing)',
+            'warning': 'REMOVER EN PRODUCCIÓN'
         }), 200
         
     except Exception as e:
@@ -279,8 +411,44 @@ def generate_test_otp():
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
+# ✅ NUEVA RUTA: Verificar estado de la base de datos
+@app.route('/db-status', methods=['GET'])
+def db_status():
+    """Información sobre el estado de la base de datos"""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM users")
+            user_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+        
+        return jsonify({
+            'database_path': DB_NAME,
+            'database_exists': os.path.exists(DB_NAME),
+            'user_count': user_count,
+            'tables': tables,
+            'server_time': get_utc_now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'error': str(e),
+            'database_path': DB_NAME,
+            'database_exists': os.path.exists(DB_NAME)
+        }), 500
+
+
+# ✅ INICIALIZACIÓN AL ARRANCAR
+print(f"🚀 Iniciando Auth Service...")
+print(f"📁 Directorio base: {BASE_DIR}")
+print(f"🗃️ Base de datos: {DB_NAME}")
+
+# Inicializar BD al arrancar
 init_db()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
-    app.run(host='0.0.0.0', port=port)
+    print(f"🌐 Servidor corriendo en puerto {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
