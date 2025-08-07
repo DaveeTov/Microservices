@@ -368,3 +368,153 @@ def update_task(task_id):
         update_fields['updated_at'] = get_utc_now().isoformat()
         
         # Construir query de actualización
+        set_clause = ', '.join(f"{field} = ?" for field in update_fields.keys())
+        values = list(update_fields.values()) + [task_id, created_by]
+
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                UPDATE tasks SET {set_clause}
+                WHERE id = ? AND created_by = ? AND isAlive = 1
+            ''', values)
+            conn.commit()
+
+            if cursor.rowcount == 0:
+                return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
+
+        return jsonify({
+            'message': 'Tarea actualizada exitosamente',
+            'task_id': task_id,
+            'updated_fields': list(update_fields.keys()),
+            'updated_at': update_fields['updated_at']
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error actualizando tarea {task_id}: {e}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
+# ✅ BORRADO LÓGICO MEJORADO
+@app.route('/tasks/<int:task_id>', methods=['DELETE'])
+@token_required
+def delete_task(task_id):
+    try:
+        created_by = request.user['id']
+        current_time = get_utc_now().isoformat()
+        
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE tasks SET isAlive = 0, updated_at = ?
+                WHERE id = ? AND created_by = ? AND isAlive = 1
+            ''', (current_time, task_id, created_by))
+            conn.commit()
+
+            if cursor.rowcount == 0:
+                return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
+
+        return jsonify({
+            'message': 'Tarea eliminada exitosamente (borrado lógico)',
+            'task_id': task_id,
+            'deleted_at': current_time
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error eliminando tarea {task_id}: {e}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
+# ✅ ESTADÍSTICAS DE TAREAS DEL USUARIO
+@app.route('/tasks/stats', methods=['GET'])
+@token_required
+def get_task_stats():
+    try:
+        created_by = request.user['id']
+        
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            
+            # Estadísticas por estado
+            cursor.execute('''
+                SELECT status, COUNT(*) as count
+                FROM tasks 
+                WHERE created_by = ? AND isAlive = 1
+                GROUP BY status
+            ''', (created_by,))
+            status_stats = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # Estadísticas por prioridad
+            cursor.execute('''
+                SELECT priority, COUNT(*) as count
+                FROM tasks 
+                WHERE created_by = ? AND isAlive = 1
+                GROUP BY priority
+            ''', (created_by,))
+            priority_stats = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # Total de tareas
+            cursor.execute('''
+                SELECT COUNT(*) FROM tasks 
+                WHERE created_by = ? AND isAlive = 1
+            ''', (created_by,))
+            total_tasks = cursor.fetchone()[0]
+            
+            # Tareas vencidas (deadline pasado)
+            cursor.execute('''
+                SELECT COUNT(*) FROM tasks 
+                WHERE created_by = ? AND isAlive = 1 
+                AND deadline < ? AND status != 'Completed'
+            ''', (created_by, get_utc_now().isoformat()))
+            overdue_tasks = cursor.fetchone()[0]
+
+        return jsonify({
+            'total_tasks': total_tasks,
+            'overdue_tasks': overdue_tasks,
+            'status_distribution': status_stats,
+            'priority_distribution': priority_stats,
+            'generated_at': get_utc_now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error obteniendo estadísticas: {e}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
+# ✅ INFORMACIÓN DE LA BASE DE DATOS COMPARTIDA
+@app.route('/db-info', methods=['GET'])
+def db_info():
+    """Información sobre el estado de la base de datos compartida"""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            
+            # Información de tablas
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            # Conteos
+            cursor.execute("SELECT COUNT(*) FROM users")
+            user_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM tasks WHERE isAlive = 1")
+            active_tasks = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM tasks WHERE isAlive = 0")
+            deleted_tasks = cursor.fetchone()[0]
+        
+        return jsonify({
+            'service': 'task_service',
+            'database_path': DB_NAME,
+            'database_exists': os.path.exists(DB_NAME),
+            'tables': tables,
+            'counts': {
+                'users': user_count,
+                'active_tasks': active_tasks,
+                'deleted_tasks': deleted_tasks
+            },
+            'server_time': get_utc_now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'error': str(e),
+            'database_path': DB_NAME,
+            'database_exists': os.path.exists(DB_NAME)
+        }), 500
