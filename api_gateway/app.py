@@ -113,22 +113,14 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=3):
             )
             content_type = resp.headers.get('Content-Type', '').lower()
 
-            # Si es JSON o algo parecido, responde como JSON
+            # ✅ Maneja JSON puro como texto, no binario
             if resp.status_code != 503:
-                if 'application/json' in content_type or resp.text.startswith('{') or resp.text.startswith('['):
-                    try:
-                        # Si ya es dict, serializa
-                        if isinstance(resp.content, bytes):
-                            data = resp.json()
-                            return Response(json.dumps(data), status=resp.status_code, content_type='application/json')
-                        else:
-                            return Response(resp.text, status=resp.status_code, content_type='application/json')
-                    except Exception:
-                        # Fallback si el header está bien pero no es JSON válido
-                        return Response(resp.text, status=resp.status_code, content_type='application/json')
+                if 'application/json' in content_type:
+                    # Usa resp.text para JSON, NO resp.content
+                    return Response(resp.text, status=resp.status_code, content_type='application/json')
                 else:
-                    # Si el content-type es incorrecto, pero la respuesta es texto (por ejemplo, error HTML)
-                    return Response(resp.text, status=resp.status_code, content_type=content_type or 'text/plain')
+                    # Otros tipos de contenido
+                    return Response(resp.content, status=resp.status_code, content_type=content_type or 'application/octet-stream')
             else:
                 logging.warning(f"⚠️ Servicio 503: {url}")
                 time.sleep(delay)
