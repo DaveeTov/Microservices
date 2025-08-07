@@ -132,7 +132,6 @@ def register():
     if not all(field in data for field in required_fields):
         return jsonify({'error': 'Faltan campos requeridos'}), 400
 
-    # Validaciones básicas
     if len(data['password']) < 6:
         return jsonify({'error': 'La contraseña debe tener al menos 6 caracteres'}), 400
 
@@ -163,16 +162,16 @@ def register():
             conn.commit()
             user_id = cursor.lastrowid
 
-        # Generar QR para MFA
+        # Generar QR para MFA (¡correcto!)
         otp_url = pyotp.TOTP(mfa_secret).provisioning_uri(
-            name=data['username'], 
+            name=data['username'],
             issuer_name="MiAppSegura"
         )
-
         buffer = io.BytesIO()
         qrcode.make(otp_url).save(buffer)
         img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
+        # 🚩 🚩 SOLO ESTO: siempre devuelve un dict
         return jsonify({
             'message': 'Usuario registrado correctamente',
             'qrCodeUrl': f"data:image/png;base64,{img_base64}",
@@ -190,6 +189,7 @@ def register():
     except Exception as e:
         print(f"❌ Error inesperado en /register: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
+
 
 
 @app.route('/login', methods=['POST'])
@@ -453,6 +453,7 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     print(f"🌐 Servidor corriendo en puerto {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
