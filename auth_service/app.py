@@ -229,7 +229,8 @@ def login():
             'id': user[0],
             'username': user[1],
             'temp': True,
-            'exp': current_utc + timedelta(minutes=10)  # Más tiempo para OTP
+            'exp': int((current_utc + timedelta(minutes=10)).timestamp())
+          
         }, SECRET_KEY, algorithm='HS256')
 
         print(f"🕒 Token temporal generado para usuario {username}")
@@ -452,6 +453,7 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
     print(f"🌐 Servidor corriendo en puerto {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
 
