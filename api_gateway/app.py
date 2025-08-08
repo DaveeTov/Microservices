@@ -17,11 +17,13 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
 # CORS abierto (ajusta si usarás cookies)
-CORS(app,
-     origins=["*"],
-     supports_credentials=True,
-     allow_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+CORS(
+    app,
+    origins=["*"],
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+)
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj")
 JWT_ALGORITHM = 'HS256'
@@ -162,7 +164,7 @@ def task_proxy(path):
 
 
 def forward_request(service_url, prefix, path, max_retries=3, delay=2):
-    """Reenvía la petición al microservicio destino"""
+    """Reenvía la petición al microservicio destino con JSON normalizado."""
     url = f'{service_url}/{path}'
 
     # Filtrar headers problemáticos
@@ -171,8 +173,11 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
         if key.lower() not in ['host', 'content-length', 'connection']:
             headers_to_forward[key] = value
 
+    # Fuerza no usar compresión en upstream para evitar enviar gzip crudo al cliente
+    headers_to_forward['Accept-Encoding'] = 'identity'
+
     # Asegurar content-type para POST/PUT con JSON
-    if request.method in ['POST', 'PUT'] and request.get_json(silent=True):
+    if request.method in ['POST', 'PUT'] and request.get_json(silent=True) is not None:
         headers_to_forward['Content-Type'] = 'application/json'
 
     for attempt in range(max_retries):
@@ -201,49 +206,57 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
             logging.info(f"✅ Response {resp.status_code} from {url}")
 
             if resp.status_code != 503:
-                content_type = resp.headers.get('Content-Type', '').lower()
+                # Determinar si es JSON
+                upstream_ct = (resp.headers.get('Content-Type') or '').lower()
+                is_json = 'application/json' in upstream_ct
 
-                # Copiar headers relevantes
+                # Copiar headers relevantes (evitar content-length/encoding/transfer-encoding/connection)
                 response_headers = {}
                 for key, value in resp.headers.items():
-                    if key.lower() not in ['content-length', 'content-encoding', 'transfer-encoding', 'connection']:
-                        response_headers[key] = value
+                    k = key.lower()
+                    if k in ['content-length', 'content-encoding', 'transfer-encoding', 'connection']:
+                        continue
+                    response_headers[key] = value
 
-                # JSON válido
-                if 'application/json' in content_type:
+                # Si es JSON o parece texto, usa resp.text (requests ya decodifica gzip/deflate)
+                response_obj = None
+                if is_json:
+                    body_text = resp.text
+                    # Valida JSON; si no es válido, lo devolvemos como texto plano
                     try:
-                        json.loads(resp.text)
-                        response = Response(
-                            resp.text,
+                        json.loads(body_text)
+                        response_obj = Response(
+                            body_text,
                             status=resp.status_code,
                             content_type='application/json; charset=utf-8'
                         )
                     except json.JSONDecodeError:
-                        logging.warning(f"Invalid JSON response from {url}: {resp.text[:200]}")
-                        response = Response(
-                            resp.text,
+                        logging.warning(f"Upstream claimed JSON but body is not JSON. Returning as text/plain.")
+                        response_obj = Response(
+                            body_text,
                             status=resp.status_code,
                             content_type='text/plain; charset=utf-8'
                         )
-                elif content_type.startswith('text/'):
-                    response = Response(
+                elif upstream_ct.startswith('text/'):
+                    response_obj = Response(
                         resp.text,
                         status=resp.status_code,
-                        content_type=content_type
+                        content_type=upstream_ct or 'text/plain; charset=utf-8'
                     )
                 else:
-                    # Binario
-                    response = Response(
+                    # Binario (imágenes, etc.)
+                    response_obj = Response(
                         resp.content,
                         status=resp.status_code,
-                        content_type=content_type or 'application/octet-stream'
+                        content_type=upstream_ct or 'application/octet-stream'
                     )
 
-                # Añadir headers
+                # Añadir headers saneados
                 for key, value in response_headers.items():
-                    response.headers[key] = value
+                    response_obj.headers[key] = value
 
-                return response
+                return response_obj
+
             else:
                 logging.warning(f"⚠️  Service 503 unavailable: {url}")
                 if attempt < max_retries - 1:
