@@ -23,7 +23,7 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj")
 app.config["JSON_AS_ASCII"] = False
 app.config["JSONIFY_MIMETYPE"] = "application/json"
 
-# CORS: si defines FRONTEND_ORIGINS (coma-separado) habilita credenciales; si no, usa "*"
+# CORS
 FRONTEND_ORIGINS = os.environ.get("FRONTEND_ORIGINS", "*")
 origins_list = [o.strip() for o in FRONTEND_ORIGINS.split(",") if o.strip()]
 CORS(
@@ -37,7 +37,6 @@ CORS(
 def normalize_json_response(response):
     ct = (response.headers.get("Content-Type") or "").lower()
     if "application/json" in ct:
-        # Fuerza charset utf-8 (algunos proxies/navegadores se confunden sin charset)
         response.headers["Content-Type"] = "application/json; charset=utf-8"
     return response
 
@@ -61,7 +60,7 @@ def get_conn(timeout=10):
     conn = sqlite3.connect(DB_NAME, timeout=timeout, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
-    conn.execute("PRAGMA busy_timeout=5000;")  # ms
+    conn.execute("PRAGMA busy_timeout=5000;")
     return conn
 
 
@@ -103,20 +102,18 @@ def init_db():
                 )
             ''')
 
-            print(f"Auth Service: Base de datos inicializada en {DB_NAME}")
+            print(f"✅ Auth Service: Base de datos inicializada en {DB_NAME}")
 
     except Exception as e:
-        print(f"Error inicializando BD: {e}")
+        print(f"❌ Error inicializando BD: {e}")
 
 
 def get_utc_now():
-    """Obtiene el tiempo actual en UTC"""
     return datetime.now(timezone.utc)
 
 
 def handle_db_error(operation, error):
-    """Manejo centralizado de errores de base de datos"""
-    print(f"Error en {operation}: {error}")
+    print(f"❌ Error en {operation}: {error}")
     s = str(error).lower()
     if "database is locked" in s:
         return {"error": "Database temporarily unavailable, please try again"}, 503
@@ -163,7 +160,7 @@ def health_check():
 @app.route('/register', methods=['POST'])
 def register():
     try:
-        # Permite include_qr en query o en body (default: True)
+        # include_qr en query o body (default: True)
         include_qr_qs = request.args.get("include_qr")
         data = request.get_json(silent=True) or {}
         include_qr_body = data.get("include_qr")
@@ -185,7 +182,6 @@ def register():
                 'missing_fields': missing_fields
             }), 400
 
-        # Validaciones adicionales
         if len(data['password']) < 6:
             return jsonify({'error': 'La contraseña debe tener al menos 6 caracteres'}), 400
         if '@' not in data['email']:
@@ -196,7 +192,7 @@ def register():
         mfa_secret = pyotp.random_base32()
         current_time = get_utc_now().isoformat()
 
-        # Insertar en base de datos
+        # Insertar en base
         with get_conn(timeout=10) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -218,23 +214,26 @@ def register():
             ))
             user_id = cursor.lastrowid
 
-        # Preparar respuesta
+        # Respuesta base
         resp_data = {
             'user_id': user_id,
             'username': data['username'],
             'email': data['email']
         }
 
-        # Incluir QR solo si se solicita
+        # Incluir QR si corresponde
         if include_qr:
-            otp_url = pyotp.TOTP(mfa_secret).provisioning_uri(
-                name=data['username'],
-                issuer_name="TaskManager"
-            )
+            totp = pyotp.TOTP(mfa_secret)
+            otp_url = totp.provisioning_uri(name=data['username'], issuer_name="TaskManager")
+
             buffer = io.BytesIO()
             qrcode.make(otp_url).save(buffer, format='PNG')
             img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+            # Compatibilidad + campos “JSON puros”
             resp_data['qrCodeUrl'] = f"data:image/png;base64,{img_base64}"
+            resp_data['qrPngBase64'] = img_base64
+            resp_data['otpauthUrl'] = otp_url
 
         return jsonify({
             'success': True,
@@ -257,7 +256,7 @@ def register():
         return jsonify(error_response[0]), error_response[1]
 
     except Exception as e:
-        print(f"Error inesperado en register: {e}")
+        print(f"❌ Error inesperado en register: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
@@ -273,8 +272,6 @@ def login():
         if not username or not password:
             return jsonify({'error': 'Usuario y contraseña son requeridos'}), 400
 
-        print(f"Intento de login para: {username}")
-
         # Buscar usuario
         with get_conn(timeout=10) as conn:
             cursor = conn.cursor()
@@ -285,7 +282,6 @@ def login():
             user = cursor.fetchone()
 
         if not user:
-            print(f"Usuario {username} no encontrado")
             time.sleep(1)
             return jsonify({'error': 'Credenciales incorrectas'}), 401
 
@@ -295,13 +291,10 @@ def login():
             return jsonify({'error': 'Usuario inactivo'}), 403
 
         if not check_password_hash(db_password, password):
-            print(f"Contraseña incorrecta para {username}")
             time.sleep(1)
             return jsonify({'error': 'Credenciales incorrectas'}), 401
 
-        print(f"Credenciales válidas para {username}")
-
-        # Generar token temporal (10 min)
+        # Token temporal (10 min)
         current_utc = get_utc_now()
         temp_token = jwt.encode({
             'id': user_id,
@@ -332,7 +325,7 @@ def login():
         return jsonify(error_response[0]), error_response[1]
 
     except Exception as e:
-        print(f"Error en login: {e}")
+        print(f"❌ Error en login: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
@@ -390,14 +383,11 @@ def verify_otp():
         is_valid = False
         for window in range(-2, 3):  # -60s a +60s
             test_time = current_time + (window * 30)
-            expected_code = totp.at(test_time)
-            if expected_code == otp_code:
+            if totp.at(test_time) == otp_code:
                 is_valid = True
-                print(f"OTP válido en ventana {window} para {username}")
                 break
 
         if not is_valid:
-            print(f"OTP inválido para {username}. Código: {otp_code}")
             return jsonify({
                 'error': 'Código OTP inválido',
                 'message': 'Verifica que tu dispositivo tenga la hora correcta'
@@ -421,8 +411,6 @@ def verify_otp():
             'iat': int(current_utc.timestamp())
         }, SECRET_KEY, algorithm='HS256')
 
-        print(f"Login exitoso para {username}")
-
         return jsonify({
             'success': True,
             'message': 'Autenticación exitosa',
@@ -443,13 +431,12 @@ def verify_otp():
         return jsonify(error_response[0]), error_response[1]
 
     except Exception as e:
-        print(f"Error en verify-otp: {e}")
+        print(f"❌ Error en verify-otp: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
 @app.route('/server-time', methods=['GET'])
 def server_time():
-    """Devuelve el tiempo actual del servidor para sincronización"""
     current_utc = get_utc_now()
     return jsonify({
         "server_utc": current_utc.isoformat(),
@@ -460,13 +447,11 @@ def server_time():
 
 @app.route('/validate-token', methods=['POST'])
 def validate_token():
-    """Valida un token JWT"""
     try:
         data = request.get_json()
         token = data.get('token') if data else None
 
         if not token:
-            # Intentar obtener del header Authorization
             auth_header = request.headers.get('Authorization')
             if auth_header and auth_header.startswith('Bearer '):
                 token = auth_header.split(' ')[1]
@@ -476,8 +461,6 @@ def validate_token():
 
         try:
             decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-
-            # Verificar que no sea un token temporal
             if decoded.get('temp'):
                 return jsonify({'error': 'Token temporal no válido para esta operación'}), 401
 
@@ -499,13 +482,12 @@ def validate_token():
             return jsonify({'error': 'Token inválido'}), 401
 
     except Exception as e:
-        print(f"Error validando token: {e}")
+        print(f"❌ Error validando token: {e}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
 @app.route('/db-status', methods=['GET'])
 def db_status():
-    """Información sobre el estado de la base de datos"""
     try:
         with get_conn(timeout=5) as conn:
             cursor = conn.cursor()
@@ -533,6 +515,7 @@ def db_status():
             'database_exists': os.path.exists(DB_NAME)
         }), 500
 
+
 # =========================
 #   Manejo de errores
 # =========================
@@ -555,14 +538,13 @@ def internal_error(error):
 # =========================
 #     Inicialización
 # =========================
-print("Iniciando Auth Service...")
-print(f"Directorio base: {BASE_DIR}")
-print(f"Base de datos: {DB_NAME}")
+print("🚀 Iniciando Auth Service...")
+print(f"📁 Directorio base: {BASE_DIR}")
+print(f"🗃️ Base de datos: {DB_NAME}")
 
 init_db()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
-    print(f"Auth Service corriendo en puerto {port}")
+    print(f"🌐 Auth Service corriendo en puerto {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
-
