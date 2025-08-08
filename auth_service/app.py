@@ -533,9 +533,36 @@ def db_status():
             'database_exists': os.path.exists(DB_NAME)
         }), 500
 
-
 # =========================
 #   Manejo de errores
 # =========================
 @app.errorhandler(404)
-def not_found(erro_
+def not_found(error):
+    return jsonify({
+        'error': 'Endpoint not found',
+        'path': request.path,
+        'method': request.method
+    }), 404
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        'error': 'Internal server error'
+    }), 500
+
+
+# =========================
+#     Inicialización
+# =========================
+print("Iniciando Auth Service...")
+print(f"Directorio base: {BASE_DIR}")
+print(f"Base de datos: {DB_NAME}")
+
+init_db()
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5001))
+    print(f"Auth Service corriendo en puerto {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
+
