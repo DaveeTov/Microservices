@@ -351,13 +351,14 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
             logging.info(f"🔄 Retrying {url} in {delay} seconds...")
             time.sleep(delay)
 
-    return make_response({
-        'error': 'Service unavailable after retries',
-        'service': prefix,
-        'attempts": max_retries,
-        'url': url,
-        'timestamp': datetime.utcnow().isoformat()
-    }, 503)
+return make_response({
+    'error': 'Service unavailable after retries',
+    'service': prefix,
+    'attempts': max_retries,
+    'url': url,
+    'timestamp': datetime.utcnow().isoformat()
+}, 503)
+
 
 # =========================
 #   Service health checks
@@ -469,3 +470,4 @@ if __name__ == '__main__':
 
     print(f"\n🌐 Gateway available at: http://localhost:{port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
