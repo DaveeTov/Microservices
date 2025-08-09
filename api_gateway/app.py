@@ -19,9 +19,6 @@ app = Flask(__name__)
 # =========================
 #        C O R S
 # =========================
-# IMPORTANTE:
-# - No usar origins="*" si supports_credentials=True
-# - No mezclar after_request que cambie CORS con before_request que también lo haga
 ALLOWED_ORIGINS = {
     "http://localhost:4200",
     "https://gui-angular.vercel.app"
@@ -31,9 +28,9 @@ ALLOWED_ORIGINS = {
 CORS(
     app,
     resources={r"/*": {"origins": list(ALLOWED_ORIGINS)}},
-    supports_credentials=True,  # Cambia a False si NO usas cookies/credenciales
+    supports_credentials=True,  # pon False si NO usas cookies/sesión
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
     expose_headers=["Content-Type", "Authorization"]
 )
 
@@ -52,19 +49,22 @@ def save_log(data):
         logging.error(f"Error saving log: {e}")
 
 # =========================
-#   Preflight universal
+#   Preflight universal (ECHO)
 # =========================
-# Manejo explícito del preflight para cualquier ruta.
 @app.route('/<path:_any>', methods=['OPTIONS'])
 def any_options(_any):
     origin = request.headers.get("Origin", "")
+    requested_headers = request.headers.get("Access-Control-Request-Headers", "")
+    requested_method = request.headers.get("Access-Control-Request-Method", "GET")
+
     resp = make_response("", 204)
     if origin in ALLOWED_ORIGINS:
         resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
+        resp.headers["Vary"] = "Origin, Access-Control-Request-Headers, Access-Control-Request-Method"
         resp.headers["Access-Control-Allow-Credentials"] = "true"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
+        # 🔑 reflejar exactamente lo que pidió el navegador (minúsculas/mayúsculas)
+        resp.headers["Access-Control-Allow-Headers"] = requested_headers or "Authorization, Content-Type, X-Requested-With"
         resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
 
@@ -156,7 +156,7 @@ def auth_proxy(path):
 def user_proxy(path):
     return forward_request(USER_SERVICE_URL, 'user', path)
 
-# ✅ RUTAS ESPECÍFICAS DE TASKS (orden importa - más específicas primero)
+# ✅ RUTAS ESPECÍFICAS DE TASKS (orden importa)
 @app.route('/tasks/stats', methods=['GET'])
 def tasks_stats_proxy():
     return forward_request(TASK_SERVICE_URL, 'tasks', 'tasks/stats')
@@ -181,21 +181,21 @@ def task_proxy(path):
     return forward_request(TASK_SERVICE_URL, 'task', path)
 
 def _cors_preflight_response():
-    """Construye una respuesta 204 con headers CORS válidos para el origen actual."""
+    """Construye respuesta 204 con headers CORS reflejando lo solicitado."""
     origin = request.headers.get("Origin", "")
+    requested_headers = request.headers.get("Access-Control-Request-Headers", "")
     resp = make_response("", 204)
     if origin in ALLOWED_ORIGINS:
         resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
+        resp.headers["Vary"] = "Origin, Access-Control-Request-Headers"
         resp.headers["Access-Control-Allow-Credentials"] = "true"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
+        resp.headers["Access-Control-Allow-Headers"] = requested_headers or "Authorization, Content-Type, X-Requested-With"
         resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
 
 def forward_request(service_url, prefix, path, max_retries=3, delay=2):
     """Reenvía la petición al microservicio destino con JSON normalizado."""
-    # Si por algo cae aquí un OPTIONS (no debería por la ruta universal), respóndelo
     if request.method == "OPTIONS":
         return _cors_preflight_response()
 
@@ -354,7 +354,7 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
     return make_response({
         'error': 'Service unavailable after retries',
         'service': prefix,
-        'attempts': max_retries,
+        'attempts": max_retries,
         'url': url,
         'timestamp': datetime.utcnow().isoformat()
     }, 503)
