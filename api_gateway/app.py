@@ -140,22 +140,24 @@ def user_proxy(path):
     return forward_request(USER_SERVICE_URL, 'user', path)
 
 
-# Rutas específicas de tasks
+# ✅ RUTAS ESPECÍFICAS DE TASKS (orden importa - más específicas primero)
 @app.route('/tasks/stats', methods=['GET', 'OPTIONS'])
 def tasks_stats_proxy():
     return forward_request(TASK_SERVICE_URL, 'tasks', 'tasks/stats')
 
+@app.route('/tasks/<int:task_id>/status', methods=['PUT', 'OPTIONS'])
+def tasks_status_proxy(task_id):
+    path = f'tasks/{task_id}/status'
+    return forward_request(TASK_SERVICE_URL, 'tasks', path)
 
 @app.route('/tasks/<int:task_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
 def tasks_by_id_proxy(task_id):
     path = f'tasks/{task_id}'
     return forward_request(TASK_SERVICE_URL, 'tasks', path)
 
-
 @app.route('/tasks', methods=['GET', 'POST', 'OPTIONS'])
 def tasks_proxy():
     return forward_request(TASK_SERVICE_URL, 'tasks', 'tasks')
-
 
 # Genérica (al final)
 @app.route('/task/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
