@@ -16,16 +16,17 @@ logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 
-# CORS abierto (ajusta si usarás cookies)
+# CORS configuration - more permissive for development
 CORS(
     app,
     origins=["*"],
     supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers=["Content-Type", "Authorization", "Access-Control-Allow-Origin"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    expose_headers=["Content-Type", "Authorization"]
 )
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj")
+SECRET_KEY = os.environ.get("SECRET_KEY", "jkhfcjkdhsclhjsafjchlkrhfkñqj")
 JWT_ALGORITHM = 'HS256'
 
 # =========================
@@ -41,20 +42,18 @@ def save_log(data):
 
 
 # =========================
-#   Preflight primero
+#   Preflight CORS handling
 # =========================
 @app.before_request
 def handle_preflight():
     if request.method == "OPTIONS":
         resp = make_response()
         origin = request.headers.get("Origin", "*")
-        req_headers = request.headers.get("Access-Control-Request-Headers", "*")
-        req_method = request.headers.get("Access-Control-Request-Method", "*")
         resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
-        resp.headers["Access-Control-Allow-Headers"] = req_headers
-        resp.headers["Access-Control-Allow-Methods"] = req_method
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Access-Control-Allow-Origin"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Max-Age"] = "3600"
         return resp
 
 
@@ -63,6 +62,9 @@ def handle_preflight():
 # =========================
 @app.before_request
 def log_request():
+    if request.method == "OPTIONS":
+        return  # Skip logging for preflight requests
+        
     request.start_time = time.time()
     json_payload = request.get_json(silent=True)
     usuario = None
@@ -93,6 +95,14 @@ def log_request():
 
 @app.after_request
 def log_response(response):
+    # Add CORS headers to all responses
+    origin = request.headers.get("Origin", "*")
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    if request.method == "OPTIONS":
+        return response  # Skip logging for preflight requests
+    
     try:
         duration = time.time() - getattr(request, 'start_time', time.time())
         log_data = getattr(request, 'log_data', {})
@@ -167,12 +177,22 @@ def task_proxy(path):
 
 def forward_request(service_url, prefix, path, max_retries=3, delay=2):
     """Reenvía la petición al microservicio destino con JSON normalizado."""
+    
+    # Handle OPTIONS requests immediately
+    if request.method == "OPTIONS":
+        resp = make_response()
+        resp.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        return resp
+    
     url = f'{service_url}/{path}'
 
     # Filtrar headers problemáticos
     headers_to_forward = {}
     for key, value in request.headers:
-        if key.lower() not in ['host', 'content-length', 'connection']:
+        if key.lower() not in ['host', 'content-length', 'connection', 'origin']:
             headers_to_forward[key] = value
 
     # Fuerza no usar compresión en upstream para evitar enviar gzip crudo al cliente
@@ -194,15 +214,16 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
             # Query params
             query_params = dict(request.args) if request.args else None
 
-            # Petición
+            # Petición con timeout más largo para servicios lentos
             resp = requests.request(
                 method=request.method,
                 url=url,
                 json=request_data,
                 headers=headers_to_forward,
                 params=query_params,
-                timeout=30,
-                allow_redirects=False
+                timeout=60,  # Increased timeout
+                allow_redirects=False,
+                verify=True  # Ensure SSL verification
             )
 
             logging.info(f"✅ Response {resp.status_code} from {url}")
@@ -256,6 +277,10 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
                 # Añadir headers saneados
                 for key, value in response_headers.items():
                     response_obj.headers[key] = value
+                
+                # Ensure CORS headers are present
+                response_obj.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
+                response_obj.headers["Access-Control-Allow-Credentials"] = "true"
 
                 return response_obj
 
@@ -270,16 +295,29 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
                 return make_response({
                     'error': 'Service timeout',
                     'service': prefix,
+                    'url': url,
                     'timestamp': datetime.utcnow().isoformat()
                 }, 504)
-        except requests.exceptions.ConnectionError:
-            logging.error(f"🔌 Connection error to {url}")
+        except requests.exceptions.ConnectionError as e:
+            logging.error(f"🔌 Connection error to {url}: {str(e)}")
             if attempt == max_retries - 1:
                 return make_response({
                     'error': 'Service unavailable - connection failed',
                     'service': prefix,
+                    'url': url,
+                    'details': str(e),
                     'timestamp': datetime.utcnow().isoformat()
                 }, 503)
+        except requests.exceptions.RequestException as e:
+            logging.error(f"📡 Request error to {url}: {str(e)}")
+            if attempt == max_retries - 1:
+                return make_response({
+                    'error': 'Request failed',
+                    'service': prefix,
+                    'url': url,
+                    'details': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                }, 502)
         except Exception as e:
             logging.error(f"❌ Error forwarding request to {url}: {e}")
             if attempt == max_retries - 1:
@@ -298,18 +336,62 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
                     'error': 'Internal server error',
                     'message': 'Service temporarily unavailable',
                     'service': prefix,
+                    'url': url,
                     'timestamp': datetime.utcnow().isoformat()
                 }, 503)
 
         if attempt < max_retries - 1:
+            logging.info(f"🔄 Retrying {url} in {delay} seconds...")
             time.sleep(delay)
 
     return make_response({
         'error': 'Service unavailable after retries',
         'service': prefix,
         'attempts': max_retries,
+        'url': url,
         'timestamp': datetime.utcnow().isoformat()
     }, 503)
+
+
+# =========================
+#   Service health checks
+# =========================
+@app.route('/health/services', methods=['GET'])
+def health_services():
+    """Check health of all downstream services"""
+    services = {
+        'auth': AUTH_SERVICE_URL,
+        'user': USER_SERVICE_URL,
+        'task': TASK_SERVICE_URL
+    }
+    
+    health_status = {}
+    overall_healthy = True
+    
+    for service_name, service_url in services.items():
+        try:
+            response = requests.get(f"{service_url}/health", timeout=10)
+            health_status[service_name] = {
+                'status': 'healthy' if response.status_code == 200 else 'unhealthy',
+                'status_code': response.status_code,
+                'url': service_url
+            }
+            if response.status_code != 200:
+                overall_healthy = False
+        except Exception as e:
+            health_status[service_name] = {
+                'status': 'unhealthy',
+                'error': str(e),
+                'url': service_url
+            }
+            overall_healthy = False
+    
+    return make_response({
+        'gateway_status': 'healthy',
+        'services': health_status,
+        'overall_healthy': overall_healthy,
+        'timestamp': datetime.utcnow().isoformat()
+    }, 200 if overall_healthy else 503)
 
 
 # =========================
@@ -317,20 +399,42 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
 # =========================
 @app.errorhandler(404)
 def not_found(error):
-    return make_response({
+    response = make_response({
         'error': 'Endpoint not found',
         'path': request.path,
         'method': request.method,
+        'available_endpoints': [
+            '/auth/<path>',
+            '/user/<path>',
+            '/tasks',
+            '/tasks/<id>',
+            '/tasks/<id>/status',
+            '/tasks/stats',
+            '/health',
+            '/health/services'
+        ],
         'timestamp': datetime.utcnow().isoformat()
     }, 404)
+    
+    # Add CORS headers to error responses
+    response.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 
 @app.errorhandler(500)
 def internal_error(error):
-    return make_response({
+    response = make_response({
         'error': 'Internal server error',
         'timestamp': datetime.utcnow().isoformat()
     }, 500)
+    
+    # Add CORS headers to error responses
+    response.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
 
 
 # =========================
@@ -342,4 +446,20 @@ if __name__ == '__main__':
     print(f"📡 Auth Service: {AUTH_SERVICE_URL}")
     print(f"👤 User Service: {USER_SERVICE_URL}")
     print(f"📋 Task Service: {TASK_SERVICE_URL}")
+    
+    # Test service connectivity on startup
+    print("\n🔍 Testing service connectivity...")
+    for service_name, service_url in [
+        ('Auth', AUTH_SERVICE_URL),
+        ('User', USER_SERVICE_URL),
+        ('Task', TASK_SERVICE_URL)
+    ]:
+        try:
+            response = requests.get(f"{service_url}/health", timeout=10)
+            status = "✅ OK" if response.status_code == 200 else f"⚠️  Status {response.status_code}"
+            print(f"  {service_name} Service: {status}")
+        except Exception as e:
+            print(f"  {service_name} Service: ❌ Error - {str(e)}")
+    
+    print(f"\n🌐 Gateway available at: http://localhost:{port}")
     app.run(host='0.0.0.0', port=port, debug=False)
