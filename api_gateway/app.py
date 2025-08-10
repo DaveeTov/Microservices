@@ -7,7 +7,6 @@ from datetime import datetime
 import jwt
 import requests
 from flask import Flask, make_response, request, Response
-from flask_cors import CORS
 
 # =========================
 #         Logging
@@ -21,18 +20,8 @@ app = Flask(__name__)
 # =========================
 ALLOWED_ORIGINS = {
     "http://localhost:4200",
-    "https://gui-angular.vercel.app"
-    # agrega otros orígenes válidos si los necesitas
+    "https://gui-angular.vercel.app",
 }
-
-CORS(
-    app,
-    resources={r"/*": {"origins": list(ALLOWED_ORIGINS)}},
-    supports_credentials=True,  # pon False si NO usas cookies/sesión
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
-    expose_headers=["Content-Type", "Authorization"]
-)
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "jkhfcjkdhsclhjsafjchlkrhfkñqj")
 JWT_ALGORITHM = 'HS256'
@@ -49,24 +38,36 @@ def save_log(data):
         logging.error(f"Error saving log: {e}")
 
 # =========================
-#   Preflight universal (ECHO)
+#   Helpers CORS
 # =========================
-@app.route('/<path:_any>', methods=['OPTIONS'])
-def any_options(_any):
-    origin = request.headers.get("Origin", "")
-    requested_headers = request.headers.get("Access-Control-Request-Headers", "")
-    requested_method = request.headers.get("Access-Control-Request-Method", "GET")
+def _build_allow_headers():
+    """Une los headers pedidos por el navegador + los obligatorios."""
+    requested = (request.headers.get("Access-Control-Request-Headers", "") or "").lower()
+    requested_set = {h.strip() for h in requested.split(",") if h.strip()}
+    required = {"authorization", "content-type", "x-requested-with"}
+    allowed = sorted(requested_set.union(required))
+    return ", ".join(allowed) if allowed else "authorization, content-type, x-requested-with"
 
+def _preflight_response():
+    origin = request.headers.get("Origin", "")
     resp = make_response("", 204)
     if origin in ALLOWED_ORIGINS:
         resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin, Access-Control-Request-Headers, Access-Control-Request-Method"
         resp.headers["Access-Control-Allow-Credentials"] = "true"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        # 🔑 reflejar exactamente lo que pidió el navegador (minúsculas/mayúsculas)
-        resp.headers["Access-Control-Allow-Headers"] = requested_headers or "Authorization, Content-Type, X-Requested-With"
+        resp.headers["Access-Control-Allow-Headers"] = _build_allow_headers()
         resp.headers["Access-Control-Max-Age"] = "86400"
+        resp.headers["Vary"] = "Origin, Access-Control-Request-Headers, Access-Control-Request-Method"
     return resp
+
+# =========================
+#   Preflight global
+# =========================
+@app.before_request
+def intercept_all_preflights():
+    # No logueamos ni dejamos que Flask genere el OPTIONS automático
+    if request.method == "OPTIONS":
+        return _preflight_response()
 
 # =========================
 #   Middleware de logging
@@ -74,7 +75,7 @@ def any_options(_any):
 @app.before_request
 def log_request():
     if request.method == "OPTIONS":
-        return  # no log para preflight
+        return  # ya atendido arriba
 
     request.start_time = time.time()
     json_payload = request.get_json(silent=True)
@@ -105,15 +106,16 @@ def log_request():
 
 @app.after_request
 def log_response(response):
-    # Asegura headers CORS solo para orígenes permitidos
+    # Refuerzo CORS para respuestas no-OPTIONS
     origin = request.headers.get("Origin", "")
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Vary"] = "Origin"
         response.headers["Access-Control-Allow-Credentials"] = "true"
+        existing_vary = response.headers.get("Vary", "")
+        response.headers["Vary"] = ("Origin" if not existing_vary else f"{existing_vary}, Origin")
 
     if request.method == "OPTIONS":
-        return response  # no log para preflight
+        return response  # nada de logs
 
     try:
         duration = time.time() - getattr(request, 'start_time', time.time())
@@ -180,24 +182,9 @@ def tasks_proxy():
 def task_proxy(path):
     return forward_request(TASK_SERVICE_URL, 'task', path)
 
-def _cors_preflight_response():
-    """Construye respuesta 204 con headers CORS reflejando lo solicitado."""
-    origin = request.headers.get("Origin", "")
-    requested_headers = request.headers.get("Access-Control-Request-Headers", "")
-    resp = make_response("", 204)
-    if origin in ALLOWED_ORIGINS:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin, Access-Control-Request-Headers"
-        resp.headers["Access-Control-Allow-Credentials"] = "true"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = requested_headers or "Authorization, Content-Type, X-Requested-With"
-        resp.headers["Access-Control-Max-Age"] = "86400"
-    return resp
-
 def forward_request(service_url, prefix, path, max_retries=3, delay=2):
     """Reenvía la petición al microservicio destino con JSON normalizado."""
-    if request.method == "OPTIONS":
-        return _cors_preflight_response()
+    # Nota: OPTIONS ya fue atendido en @before_request
 
     url = f'{service_url}/{path}'
 
@@ -351,7 +338,6 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
             logging.info(f"🔄 Retrying {url} in {delay} seconds...")
             time.sleep(delay)
 
-    # 👇 ESTE return estaba desindentado (provocaba 'return outside function')
     return make_response({
         'error': 'Service unavailable after retries',
         'service': prefix,
@@ -424,8 +410,9 @@ def not_found(error):
     origin = request.headers.get("Origin", "")
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Vary"] = "Origin"
         response.headers["Access-Control-Allow-Credentials"] = "true"
+        existing_vary = response.headers.get("Vary", "")
+        response.headers["Vary"] = ("Origin" if not existing_vary else f"{existing_vary}, Origin")
 
     return response
 
@@ -439,8 +426,9 @@ def internal_error(error):
     origin = request.headers.get("Origin", "")
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Vary"] = "Origin"
         response.headers["Access-Control-Allow-Credentials"] = "true"
+        existing_vary = response.headers.get("Vary", "")
+        response.headers["Vary"] = ("Origin" if not existing_vary else f"{existing_vary}, Origin")
 
     return response
 
