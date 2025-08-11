@@ -15,6 +15,10 @@ from firebase_admin import credentials, initialize_app, db as fb_db, firestore a
 import json as pyjson
 import base64
 
+# ---- Rate Limiting ----
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
@@ -132,6 +136,76 @@ def _preflight_response():
         resp.headers["Vary"] = "Origin, Access-Control-Request-Headers, Access-Control-Request-Method"
     return resp
 
+# ====== Identificadores para Rate Limiting ======
+def _client_ip() -> str:
+    # Respeta proxies/reverse proxies
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+def _user_or_ip() -> str:
+    # Usa el usuario (JWT/email) si viene, si no la IP
+    token = request.headers.get("Authorization", "")
+    if token.startswith("Bearer "):
+        try:
+            decoded = jwt.decode(token[7:], SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            uid = decoded.get("sub") or decoded.get("username") or decoded.get("email")
+            if uid:
+                return f"user:{uid}"
+        except Exception:
+            pass
+    return f"ip:{_client_ip()}"
+
+# ====== Rate Limiter ======
+_storage_uri = (
+    os.environ.get("RATELIMIT_STORAGE_URL")
+    or os.environ.get("REDIS_URL")
+    or "memory://"
+)
+_strategy = "moving-window" if _storage_uri.startswith(("redis://", "rediss://")) else "fixed-window"
+
+limiter = Limiter(
+    key_func=_user_or_ip,                 # clave por usuario o IP
+    storage_uri=_storage_uri,             # redis://... ó memory://
+    strategy=_strategy,
+    default_limits=[                      # límite por defecto para TODO el gateway
+        "300 per minute"                  # ajusta a tu tráfico
+    ],
+    headers_enabled=True                  # añade Retry-After/X-RateLimit-* autom.
+)
+
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    # Respuesta uniforme cuando se excede el límite
+    retry_after = getattr(e, "retry_after", None)
+    data = {
+        "error": "rate_limited",
+        "message": "Demasiadas solicitudes. Inténtalo más tarde.",
+        "retry_after_seconds": retry_after if isinstance(retry_after, int) else None,
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+    # Log al archivo/Firebase
+    try:
+        duration = time.time() - getattr(request, 'start_time', time.time())
+        save_log({
+            "timestamp": data["timestamp"],
+            "method": request.method,
+            "path": request.path,
+            "servicio": (request.path.strip("/").split("/") or ["desconocido"])[0],
+            "usuario": None,
+            "ip": _client_ip(),
+            "status_code": 429,
+            "response_time_seconds": round(duration, 3),
+            "rate_limited": True
+        })
+    except Exception:
+        pass
+    resp = jsonify(data)
+    resp.status_code = 429
+    # Flask-Limiter ya setea cabeceras, no las pisamos.
+    return resp
+
 @app.before_request
 def intercept_all_preflights():
     if request.method == "OPTIONS":
@@ -165,7 +239,7 @@ def log_request():
         "path": request.path,
         "servicio": servicio,
         "usuario": usuario,
-        "ip": request.remote_addr,
+        "ip": _client_ip(),
     }
 
 @app.after_request
@@ -192,7 +266,7 @@ def log_response(response):
         logging.error(f"Error in after_request: {e}")
     return response
 
-# ====== Helpers para leer/analizar logs de Firebase ======
+# ====== Helpers Logs Firebase ======
 def _date_iter(start: datetime, end: datetime):
     d = start
     while d <= end:
@@ -296,6 +370,7 @@ def _summarize_logs(logs: List[dict]) -> dict:
 
 # ====== Endpoints Logs para DashLogs ======
 @app.route("/logs/summary", methods=["GET"])
+@limiter.limit("60 per minute", key_func=_user_or_ip)   # límite específico del endpoint
 def logs_summary():
     """
     GET /logs/summary?date=YYYY-MM-DD
@@ -328,6 +403,7 @@ def logs_summary():
     return jsonify(_summarize_logs(logs)), 200
 
 @app.route("/logs/recent", methods=["GET"])
+@limiter.limit("60 per minute", key_func=_user_or_ip)
 def logs_recent():
     """
     GET /logs/recent?date=YYYY-MM-DD&limit=200
@@ -358,41 +434,66 @@ TASK_SERVICE_URL = os.environ.get("TASK_SERVICE_URL", "https://task-service-v5ke
 
 # ====== Rutas base ======
 @app.route('/')
+@limiter.exempt
 def home():
     return {'status': 'API Gateway activo', 'timestamp': datetime.utcnow().isoformat()}, 200
 
 @app.route('/health', methods=['GET'])
+@limiter.exempt
 def health():
     return {'status': 'OK', 'message': 'Proxy server running', 'timestamp': datetime.utcnow().isoformat()}, 200
 
+# ====== Límites dinámicos para proxies ======
+def _proxy_limits():
+    """
+    Límites según ruta:
+      - /auth/*  :  20/min por usuario/IP (ej: login, register)
+      - /tasks*  : 120/min por usuario/IP
+      - default  : 300/min (hereda del default si no retornamos nada)
+    """
+    p = (request.path or "").lower()
+    if p.startswith("/auth/"):
+        return "20 per minute"
+    if p.startswith("/tasks"):
+        return "120 per minute"
+    # None => usa default_limits
+    return None
+
 # ====== Proxies ======
 @app.route('/auth/<path:path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
+@limiter.limit(_proxy_limits, key_func=_user_or_ip)
 def auth_proxy(path):
     return forward_request(AUTH_SERVICE_URL, 'auth', path)
 
 @app.route('/user/<path:path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
+@limiter.limit("200 per minute", key_func=_user_or_ip)
 def user_proxy(path):
     return forward_request(USER_SERVICE_URL, 'user', path)
 
 @app.route('/tasks/stats', methods=['GET'])
+@limiter.limit("120 per minute", key_func=_user_or_ip)
 def tasks_stats_proxy():
     return forward_request(TASK_SERVICE_URL, 'tasks', 'tasks/stats')
 
 @app.route('/tasks/<int:task_id>/status', methods=['PUT'])
+@limiter.limit("120 per minute", key_func=_user_or_ip)
 def tasks_status_proxy(task_id):
     path = f'tasks/{task_id}/status'
     return forward_request(TASK_SERVICE_URL, 'tasks', path)
 
 @app.route('/tasks/<int:task_id>', methods=['GET', 'PUT', 'DELETE'])
+@limiter.limit("120 per minute", key_func=_user_or_ip)
 def tasks_by_id_proxy(task_id):
     path = f'tasks/{task_id}'
     return forward_request(TASK_SERVICE_URL, 'tasks', path)
 
 @app.route('/tasks', methods=['GET', 'POST'])
+@limiter.limit("120 per minute", key_func=_user_or_ip)
 def tasks_proxy():
     return forward_request(TASK_SERVICE_URL, 'tasks', 'tasks')
 
 @app.route('/task/<path:path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
+@limiter.limit("120 per minute", key_func=_user_or_ip)
 def task_proxy(path):
     return forward_request(TASK_SERVICE_URL, 'task', path)
 
@@ -547,6 +648,7 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
     }, 503)
 
 @app.route('/health/services', methods=['GET'])
+@limiter.exempt
 def health_services():
     services = {
         'auth': AUTH_SERVICE_URL,
