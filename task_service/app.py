@@ -36,40 +36,73 @@ def token_required(f):
         return f(*args, **kwargs)
     return decorated
 
-def _resolve_user_id():
+def _ensure_user_and_get_id():
     """
-    Devuelve un ID numérico desde el JWT; si falta, intenta por email/username en la tabla users.
+    Asegura que exista un registro en users y devuelve su id.
+    - Si el JWT trae id numérico y NO existe en users -> lo inserta con ese id.
+    - Si trae email/username -> busca e inserta si falta.
     """
-    uid = None
-    email = None
-    username = None
+    user_payload = getattr(request, "user", {}) or {}
+    raw_id = user_payload.get('id') or user_payload.get('user_id') or user_payload.get('sub')
+    email = (user_payload.get('email') or "").strip() or None
+    username = (user_payload.get('username') or "").strip() or None
 
-    if hasattr(request, "user") and isinstance(request.user, dict):
-        uid = request.user.get('id') or request.user.get('user_id') or request.user.get('sub')
-        email = request.user.get('email')
-        username = request.user.get('username')
-
-    # si ya es numérico:
+    # Normaliza id numérico si existe
+    numeric_id = None
     try:
-        if uid is not None:
-            return int(uid)
+        if raw_id is not None:
+            numeric_id = int(raw_id)
     except (TypeError, ValueError):
-        pass
+        numeric_id = None
 
-    # buscar en tabla users por email/username
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
+        c.execute("PRAGMA foreign_keys = ON;")
+
+        # 1) Si trae id numérico, verifica existencia
+        if numeric_id is not None:
+            c.execute("SELECT id FROM users WHERE id = ?", (numeric_id,))
+            row = c.fetchone()
+            if row:
+                return numeric_id
+            # Insertar forzado con id
+            ins_username = username or f"user_{numeric_id}"
+            ins_email = email or f"user_{numeric_id}@example.local"
+            c.execute("""
+                INSERT INTO users (id, username, password, email, status)
+                VALUES (?, ?, ?, ?, 'active')
+            """, (numeric_id, ins_username, '!', ins_email))
+            conn.commit()
+            return numeric_id
+
+        # 2) Si no hay id, probar por email
         if email:
             c.execute("SELECT id FROM users WHERE email = ?", (email,))
             row = c.fetchone()
             if row:
                 return int(row[0])
+            ins_username = username or email.split('@')[0]
+            c.execute("""
+                INSERT INTO users (username, password, email, status)
+                VALUES (?, '!', ?, 'active')
+            """, (ins_username, email))
+            conn.commit()
+            return int(c.lastrowid)
+
+        # 3) Si no hay email, probar username
         if username:
             c.execute("SELECT id FROM users WHERE username = ?", (username,))
             row = c.fetchone()
             if row:
                 return int(row[0])
+            c.execute("""
+                INSERT INTO users (username, password, email, status)
+                VALUES (?, '!', ?, 'active')
+            """, (username, f"{username}@example.local"))
+            conn.commit()
+            return int(c.lastrowid)
 
+    # Si no hay forma de identificarlo, devuelve None
     return None
 
 def init_db():
@@ -139,7 +172,7 @@ def health():
 @token_required
 def tasks_debug():
     try:
-        resolved_uid = _resolve_user_id()
+        resolved_uid = _ensure_user_and_get_id()
         user_payload = getattr(request, 'user', {})
         with sqlite3.connect(DB_NAME) as conn:
             c = conn.cursor()
@@ -179,7 +212,7 @@ def create_task():
         return jsonify({'error': 'Faltan campos obligatorios', 'missing_fields': missing}), 400
 
     try:
-        created_by = _resolve_user_id()
+        created_by = _ensure_user_and_get_id()
         print(f"[DEBUG] POST /tasks resolved_user_id={created_by} payload={getattr(request,'user',{})}")
 
         if not created_by:
@@ -243,6 +276,10 @@ def create_task():
             }
         }), 201
 
+    except sqlite3.IntegrityError as e:
+        # Errores de FK/constraints más claros
+        print(f"❌ IntegrityError creando tarea: {e}")
+        return jsonify({'error': 'Violación de integridad (FK/constraints)', 'details': str(e)}), 400
     except Exception as e:
         print(f"❌ Error creando tarea: {e}")
         traceback.print_exc()
@@ -253,7 +290,7 @@ def create_task():
 @token_required
 def get_tasks():
     try:
-        created_by = _resolve_user_id()
+        created_by = _ensure_user_and_get_id()
         print(f"[DEBUG] GET /tasks resolved_user_id={created_by} payload={getattr(request,'user',{})}")
 
         if not created_by:
@@ -336,7 +373,7 @@ def get_tasks():
 @token_required
 def get_task(task_id):
     try:
-        created_by = _resolve_user_id()
+        created_by = _ensure_user_and_get_id()
         print(f"[DEBUG] GET /tasks/{task_id} resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
@@ -370,7 +407,7 @@ def get_task(task_id):
 @token_required
 def update_task(task_id):
     try:
-        created_by = _resolve_user_id()
+        created_by = _ensure_user_and_get_id()
         print(f"[DEBUG] PUT /tasks/{task_id} resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
@@ -431,7 +468,7 @@ def update_task(task_id):
 @token_required
 def update_task_status(task_id):
     try:
-        created_by = _resolve_user_id()
+        created_by = _ensure_user_and_get_id()
         print(f"[DEBUG] PUT /tasks/{task_id}/status resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver id de usuario'}), 401
@@ -467,7 +504,7 @@ def update_task_status(task_id):
 @token_required
 def delete_task(task_id):
     try:
-        created_by = _resolve_user_id()
+        created_by = _ensure_user_and_get_id()
         print(f"[DEBUG] DELETE /tasks/{task_id} resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
@@ -500,7 +537,7 @@ def delete_task(task_id):
 @token_required
 def get_task_stats():
     try:
-        created_by = _resolve_user_id()
+        created_by = _ensure_user_and_get_id()
         print(f"[DEBUG] GET /tasks/stats resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
