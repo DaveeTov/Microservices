@@ -7,21 +7,18 @@ from functools import wraps
 import jwt
 from flask import Flask, jsonify, request
 
-# Crear la aplicación Flask
 app = Flask(__name__)
 
-# ✅ PATHS – Base de datos compartida entre servicios
+# ====== Paths / DB ======
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 SHARED_DB_DIR = os.path.join(BASE_DIR, '..', 'shared_data')
 os.makedirs(SHARED_DB_DIR, exist_ok=True)
 DB_NAME = os.path.join(SHARED_DB_DIR, 'main_database.db')
 
-# 🔒 Debe ser el mismo SECRET_KEY que usa el Auth Service / Gateway
+# Debe coincidir con el SECRET del Auth Service/Gateway
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 
-# =========================
-#     Utilidades JWT/DB
-# =========================
+# ====== Helpers ======
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -41,8 +38,7 @@ def token_required(f):
 
 def _resolve_user_id():
     """
-    Intenta obtener un ID numérico desde el JWT.
-    Si solo hay email/username, lo busca en la tabla users.
+    Devuelve un ID numérico desde el JWT; si falta, intenta por email/username en la tabla users.
     """
     uid = None
     email = None
@@ -53,14 +49,14 @@ def _resolve_user_id():
         email = request.user.get('email')
         username = request.user.get('username')
 
-    # Si ya es numérico, úsalo
+    # si ya es numérico:
     try:
         if uid is not None:
             return int(uid)
     except (TypeError, ValueError):
         pass
 
-    # Buscar por email/username
+    # buscar en tabla users por email/username
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
         if email:
@@ -76,15 +72,13 @@ def _resolve_user_id():
 
     return None
 
-# =========================
-#   Inicialización de BD
-# =========================
 def init_db():
-    """Verifica e inicializa las tablas necesarias en la BD compartida."""
+    """Inicializa tablas si no existen."""
     db_exists = os.path.exists(DB_NAME)
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
+            cursor.execute("PRAGMA foreign_keys = ON;")
 
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
@@ -118,33 +112,20 @@ def init_db():
                 )
             ''')
 
-            cursor.execute("SELECT COUNT(*) FROM users")
-            user_count = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM tasks")
-            task_count = cursor.fetchone()[0]
             conn.commit()
 
-            if not db_exists:
-                print(f"✅ Task Service: BD inicializada: {DB_NAME}")
-            else:
-                print(f"✅ Task Service: BD conectada: {DB_NAME}")
-                print(f"   - Usuarios: {user_count}")
-                print(f"   - Tareas:   {task_count}")
+        print(f"✅ Task Service DB: {DB_NAME} ({'new' if not db_exists else 'existing'})")
 
     except Exception as e:
         print(f"❌ Task Service: Error inicializando BD: {e}")
         traceback.print_exc()
 
-# ⚠️ Importante: inicializar BD al cargar el módulo
 init_db()
 
 def get_utc_now():
-    """Tiempo actual en UTC."""
     return datetime.datetime.utcnow()
 
-# =========================
-#        Rutas
-# =========================
+# ====== Rutas ======
 @app.route('/')
 def home():
     return {'status': 'Task service activo'}, 200
@@ -153,7 +134,41 @@ def home():
 def health():
     return {'status': 'OK', 'message': 'Task microservice running'}, 200
 
-# ------- Crear tarea
+# --- DEBUG: info rápida
+@app.route('/tasks/debug', methods=['GET'])
+@token_required
+def tasks_debug():
+    try:
+        resolved_uid = _resolve_user_id()
+        user_payload = getattr(request, 'user', {})
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM tasks")
+            total = c.fetchone()[0]
+            c.execute("""
+                SELECT id, name, created_by, status, isAlive, create_at, deadline
+                FROM tasks
+                ORDER BY id DESC
+                LIMIT 10
+            """)
+            rows = c.fetchall()
+        return jsonify({
+            'resolved_user_id': resolved_uid,
+            'jwt_payload': user_payload,
+            'total_tasks_in_db': total,
+            'last_10_tasks_raw': [
+                {
+                    'id': r[0], 'name': r[1], 'created_by': r[2],
+                    'status': r[3], 'isAlive': r[4],
+                    'create_at': r[5], 'deadline': r[6]
+                } for r in rows
+            ]
+        }), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# --- Crear tarea
 @app.route('/tasks', methods=['POST'])
 @token_required
 def create_task():
@@ -165,6 +180,8 @@ def create_task():
 
     try:
         created_by = _resolve_user_id()
+        print(f"[DEBUG] POST /tasks resolved_user_id={created_by} payload={getattr(request,'user',{})}")
+
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
@@ -190,8 +207,9 @@ def create_task():
             return jsonify({'error': 'Prioridad inválida', 'valid_priorities': valid_priorities}), 400
 
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            c = conn.cursor()
+            c.execute("PRAGMA foreign_keys = ON;")
+            c.execute('''
                 INSERT INTO tasks (name, description, create_at, deadline, status, isAlive, created_by, updated_at, priority)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
@@ -206,9 +224,10 @@ def create_task():
                 priority
             ))
             conn.commit()
-            task_id = cursor.lastrowid
+            task_id = c.lastrowid
 
-        # Devuelve la tarea completa para inserción optimista
+        print(f"[DEBUG] INSERT OK id={task_id} created_by={created_by}")
+
         return jsonify({
             'message': 'Tarea creada exitosamente',
             'task': {
@@ -229,12 +248,14 @@ def create_task():
         traceback.print_exc()
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-# ------- Listar tareas (con filtros)
+# --- Listar tareas del usuario
 @app.route('/tasks', methods=['GET'])
 @token_required
 def get_tasks():
     try:
         created_by = _resolve_user_id()
+        print(f"[DEBUG] GET /tasks resolved_user_id={created_by} payload={getattr(request,'user',{})}")
+
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
@@ -264,9 +285,9 @@ def get_tasks():
             params.extend([limit, offset])
 
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            tasks = cursor.fetchall()
+            c = conn.cursor()
+            c.execute(query, params)
+            tasks = c.fetchall()
 
             count_query = 'SELECT COUNT(*) FROM tasks WHERE created_by = ? AND isAlive = 1'
             count_params = [created_by]
@@ -276,8 +297,8 @@ def get_tasks():
             if priority_filter:
                 count_query += ' AND priority = ?'
                 count_params.append(priority_filter)
-            cursor.execute(count_query, count_params)
-            total_count = cursor.fetchone()[0]
+            c.execute(count_query, count_params)
+            total_count = c.fetchone()[0]
 
         tasks_list = [{
             'id': t[0],
@@ -290,6 +311,8 @@ def get_tasks():
             'priority': t[7],
             'updated_at': t[8]
         } for t in tasks]
+
+        print(f"[DEBUG] GET /tasks returned_count={len(tasks_list)} total_for_user={total_count}")
 
         return jsonify({
             'tasks': tasks_list,
@@ -308,23 +331,24 @@ def get_tasks():
         traceback.print_exc()
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-# ------- Obtener una tarea
+# --- Obtener tarea individual
 @app.route('/tasks/<int:task_id>', methods=['GET'])
 @token_required
 def get_task(task_id):
     try:
         created_by = _resolve_user_id()
+        print(f"[DEBUG] GET /tasks/{task_id} resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            c = conn.cursor()
+            c.execute('''
                 SELECT id, name, description, create_at, deadline, status, isAlive, priority, updated_at 
                 FROM tasks 
                 WHERE id = ? AND created_by = ? AND isAlive = 1
             ''', (task_id, created_by))
-            t = cursor.fetchone()
+            t = c.fetchone()
 
         if not t:
             return jsonify({'error': 'Tarea no encontrada'}), 404
@@ -341,12 +365,13 @@ def get_task(task_id):
         traceback.print_exc()
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-# ------- Actualizar una tarea
+# --- Actualizar tarea completa
 @app.route('/tasks/<int:task_id>', methods=['PUT'])
 @token_required
 def update_task(task_id):
     try:
         created_by = _resolve_user_id()
+        print(f"[DEBUG] PUT /tasks/{task_id} resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
@@ -379,14 +404,14 @@ def update_task(task_id):
         values = list(update_fields.values()) + [task_id, created_by]
 
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f'''
+            c = conn.cursor()
+            c.execute(f'''
                 UPDATE tasks SET {set_clause}
                 WHERE id = ? AND created_by = ? AND isAlive = 1
             ''', values)
             conn.commit()
 
-            if cursor.rowcount == 0:
+            if c.rowcount == 0:
                 return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
 
         return jsonify({
@@ -401,12 +426,13 @@ def update_task(task_id):
         traceback.print_exc()
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-# ------- Actualizar SOLO el estado (drag & drop)
+# --- Actualizar SOLO el estado (drag & drop)
 @app.route('/tasks/<int:task_id>/status', methods=['PUT'])
 @token_required
 def update_task_status(task_id):
     try:
         created_by = _resolve_user_id()
+        print(f"[DEBUG] PUT /tasks/{task_id}/status resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver id de usuario'}), 401
 
@@ -418,15 +444,15 @@ def update_task_status(task_id):
 
         updated_at = get_utc_now().isoformat()
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            c = conn.cursor()
+            c.execute('''
                 UPDATE tasks
                 SET status = ?, updated_at = ?
                 WHERE id = ? AND created_by = ? AND isAlive = 1
             ''', (new_status, updated_at, task_id, created_by))
             conn.commit()
 
-            if cursor.rowcount == 0:
+            if c.rowcount == 0:
                 return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
 
         return jsonify({'message': 'Estado actualizado', 'task_id': task_id, 'status': new_status, 'updated_at': updated_at}), 200
@@ -436,25 +462,26 @@ def update_task_status(task_id):
         traceback.print_exc()
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-# ------- Borrado lógico
+# --- Borrado lógico
 @app.route('/tasks/<int:task_id>', methods=['DELETE'])
 @token_required
 def delete_task(task_id):
     try:
         created_by = _resolve_user_id()
+        print(f"[DEBUG] DELETE /tasks/{task_id} resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         current_time = get_utc_now().isoformat()
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            c = conn.cursor()
+            c.execute('''
                 UPDATE tasks SET isAlive = 0, updated_at = ?
                 WHERE id = ? AND created_by = ? AND isAlive = 1
             ''', (current_time, task_id, created_by))
             conn.commit()
 
-            if cursor.rowcount == 0:
+            if c.rowcount == 0:
                 return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
 
         return jsonify({
@@ -468,46 +495,47 @@ def delete_task(task_id):
         traceback.print_exc()
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-# ------- Estadísticas
+# --- Estadísticas
 @app.route('/tasks/stats', methods=['GET'])
 @token_required
 def get_task_stats():
     try:
         created_by = _resolve_user_id()
+        print(f"[DEBUG] GET /tasks/stats resolved_user_id={created_by}")
         if not created_by:
             return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
+            c = conn.cursor()
 
-            cursor.execute('''
+            c.execute('''
                 SELECT status, COUNT(*) as count
                 FROM tasks 
                 WHERE created_by = ? AND isAlive = 1
                 GROUP BY status
             ''', (created_by,))
-            status_stats = {row[0]: row[1] for row in cursor.fetchall()}
+            status_stats = {row[0]: row[1] for row in c.fetchall()}
 
-            cursor.execute('''
+            c.execute('''
                 SELECT priority, COUNT(*) as count
                 FROM tasks 
                 WHERE created_by = ? AND isAlive = 1
                 GROUP BY priority
             ''', (created_by,))
-            priority_stats = {row[0]: row[1] for row in cursor.fetchall()}
+            priority_stats = {row[0]: row[1] for row in c.fetchall()}
 
-            cursor.execute('''
+            c.execute('''
                 SELECT COUNT(*) FROM tasks 
                 WHERE created_by = ? AND isAlive = 1
             ''', (created_by,))
-            total_tasks = cursor.fetchone()[0]
+            total_tasks = c.fetchone()[0]
 
-            cursor.execute('''
+            c.execute('''
                 SELECT COUNT(*) FROM tasks 
                 WHERE created_by = ? AND isAlive = 1 
                 AND deadline < ? AND status != 'Completed'
             ''', (created_by, get_utc_now().isoformat()))
-            overdue_tasks = cursor.fetchone()[0]
+            overdue_tasks = c.fetchone()[0]
 
         return jsonify({
             'total_tasks': total_tasks,
@@ -522,22 +550,21 @@ def get_task_stats():
         traceback.print_exc()
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-# ------- Info BD (debug)
+# --- Info BD
 @app.route('/db-info', methods=['GET'])
 def db_info():
     try:
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = [row[0] for row in cursor.fetchall()]
+            c = conn.cursor()
+            c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in c.fetchall()]
 
-            # Conteos
-            cursor.execute("SELECT COUNT(*) FROM users")
-            user_count = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM tasks WHERE isAlive = 1")
-            active_tasks = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM tasks WHERE isAlive = 0")
-            deleted_tasks = cursor.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM users")
+            user_count = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM tasks WHERE isAlive = 1")
+            active_tasks = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM tasks WHERE isAlive = 0")
+            deleted_tasks = c.fetchone()[0]
 
         return jsonify({
             'service': 'task_service',
