@@ -8,16 +8,9 @@ import jwt
 import requests
 from flask import Flask, make_response, request, Response
 
-# =========================
-#         Logging
-# =========================
 logging.basicConfig(level=logging.INFO)
-
 app = Flask(__name__)
 
-# =========================
-#        C O R S
-# =========================
 ALLOWED_ORIGINS = {
     "http://localhost:4200",
     "https://gui-angular.vercel.app",
@@ -26,9 +19,6 @@ ALLOWED_ORIGINS = {
 SECRET_KEY = os.environ.get("SECRET_KEY", "jkhfcjkdhsclhjsafjchlkrhfkñqj")
 JWT_ALGORITHM = 'HS256'
 
-# =========================
-#       Persistencia logs
-# =========================
 def save_log(data):
     try:
         log_line = json.dumps(data, ensure_ascii=False)
@@ -37,11 +27,7 @@ def save_log(data):
     except Exception as e:
         logging.error(f"Error saving log: {e}")
 
-# =========================
-#   Helpers CORS
-# =========================
 def _build_allow_headers():
-    """Une los headers pedidos por el navegador + los obligatorios."""
     requested = (request.headers.get("Access-Control-Request-Headers", "") or "").lower()
     requested_set = {h.strip() for h in requested.split(",") if h.strip()}
     required = {"authorization", "content-type", "x-requested-with"}
@@ -60,23 +46,15 @@ def _preflight_response():
         resp.headers["Vary"] = "Origin, Access-Control-Request-Headers, Access-Control-Request-Method"
     return resp
 
-# =========================
-#   Preflight global
-# =========================
 @app.before_request
 def intercept_all_preflights():
-    # No logueamos ni dejamos que Flask genere el OPTIONS automático
     if request.method == "OPTIONS":
         return _preflight_response()
 
-# =========================
-#   Middleware de logging
-# =========================
 @app.before_request
 def log_request():
     if request.method == "OPTIONS":
-        return  # ya atendido arriba
-
+        return
     request.start_time = time.time()
     json_payload = request.get_json(silent=True)
     usuario = None
@@ -106,7 +84,6 @@ def log_request():
 
 @app.after_request
 def log_response(response):
-    # Refuerzo CORS para respuestas no-OPTIONS
     origin = request.headers.get("Origin", "")
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
@@ -115,7 +92,7 @@ def log_response(response):
         response.headers["Vary"] = ("Origin" if not existing_vary else f"{existing_vary}, Origin")
 
     if request.method == "OPTIONS":
-        return response  # nada de logs
+        return response
 
     try:
         duration = time.time() - getattr(request, 'start_time', time.time())
@@ -129,16 +106,12 @@ def log_response(response):
         logging.error(f"Error in after_request: {e}")
     return response
 
-# =========================
-#   URLs de los servicios
-# =========================
+# ====== Servicios destino ======
 AUTH_SERVICE_URL = os.environ.get("AUTH_SERVICE_URL", "https://auth-service-75ux.onrender.com")
 USER_SERVICE_URL = os.environ.get("USER_SERVICE_URL", "https://user-service-6hc6.onrender.com")
 TASK_SERVICE_URL = os.environ.get("TASK_SERVICE_URL", "https://task-service-v5ke.onrender.com")
 
-# =========================
-#        Rutas base
-# =========================
+# ====== Rutas base ======
 @app.route('/')
 def home():
     return {'status': 'API Gateway activo', 'timestamp': datetime.utcnow().isoformat()}, 200
@@ -147,9 +120,7 @@ def home():
 def health():
     return {'status': 'OK', 'message': 'Proxy server running', 'timestamp': datetime.utcnow().isoformat()}, 200
 
-# =========================
-#      Rutas proxy
-# =========================
+# ====== Proxies ======
 @app.route('/auth/<path:path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 def auth_proxy(path):
     return forward_request(AUTH_SERVICE_URL, 'auth', path)
@@ -158,7 +129,6 @@ def auth_proxy(path):
 def user_proxy(path):
     return forward_request(USER_SERVICE_URL, 'user', path)
 
-# ✅ RUTAS ESPECÍFICAS DE TASKS (orden importa)
 @app.route('/tasks/stats', methods=['GET'])
 def tasks_stats_proxy():
     return forward_request(TASK_SERVICE_URL, 'tasks', 'tasks/stats')
@@ -177,38 +147,28 @@ def tasks_by_id_proxy(task_id):
 def tasks_proxy():
     return forward_request(TASK_SERVICE_URL, 'tasks', 'tasks')
 
-# Genérica (al final)
 @app.route('/task/<path:path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 def task_proxy(path):
     return forward_request(TASK_SERVICE_URL, 'task', path)
 
 def forward_request(service_url, prefix, path, max_retries=3, delay=2):
-    """Reenvía la petición al microservicio destino con JSON normalizado."""
-    # Nota: OPTIONS ya fue atendido en @before_request
-
     url = f'{service_url}/{path}'
-
-    # Filtrar headers problemáticos
     headers_to_forward = {}
     for key, value in request.headers:
         if key.lower() not in ['host', 'content-length', 'connection', 'origin']:
             headers_to_forward[key] = value
 
-    # Evitar compresión hacia upstream (para no devolver gzip crudo)
     headers_to_forward['Accept-Encoding'] = 'identity'
 
-    # Asegurar content-type para POST/PUT/PATCH con JSON
     if request.method in ['POST', 'PUT', 'PATCH'] and request.get_json(silent=True) is not None:
         headers_to_forward['Content-Type'] = 'application/json'
 
     for attempt in range(max_retries):
         try:
             logging.info(f"➡️  Forwarding {request.method} {url} (intento {attempt + 1})")
-
             request_data = None
             if request.method in ['POST', 'PUT', 'PATCH']:
                 request_data = request.get_json(silent=True)
-
             query_params = dict(request.args) if request.args else None
 
             resp = requests.request(
@@ -228,7 +188,6 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
                 upstream_ct = (resp.headers.get('Content-Type') or '').lower()
                 is_json = 'application/json' in upstream_ct
 
-                # Copia de headers saneados
                 response_headers = {}
                 for key, value in resp.headers.items():
                     k = key.lower()
@@ -236,7 +195,6 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
                         continue
                     response_headers[key] = value
 
-                # Cuerpo
                 if is_json:
                     body_text = resp.text
                     try:
@@ -247,7 +205,6 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
                             content_type='application/json; charset=utf-8'
                         )
                     except json.JSONDecodeError:
-                        logging.warning("Upstream dijo JSON pero no lo es. Se devuelve como texto.")
                         response_obj = Response(
                             body_text,
                             status=resp.status_code,
@@ -266,11 +223,9 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
                         content_type=upstream_ct or 'application/octet-stream'
                     )
 
-                # Headers del upstream
                 for key, value in response_headers.items():
                     response_obj.headers[key] = value
 
-                # Refuerzo CORS por si acaso
                 origin = request.headers.get("Origin", "")
                 if origin in ALLOWED_ORIGINS:
                     response_obj.headers["Access-Control-Allow-Origin"] = origin
@@ -346,9 +301,6 @@ def forward_request(service_url, prefix, path, max_retries=3, delay=2):
         'timestamp': datetime.utcnow().isoformat()
     }, 503)
 
-# =========================
-#   Service health checks
-# =========================
 @app.route('/health/services', methods=['GET'])
 def health_services():
     services = {
@@ -385,9 +337,6 @@ def health_services():
         'timestamp': datetime.utcnow().isoformat()
     }, 200 if overall_healthy else 503)
 
-# =========================
-#   Manejo de errores
-# =========================
 @app.errorhandler(404)
 def not_found(error):
     response = make_response({
@@ -432,9 +381,6 @@ def internal_error(error):
 
     return response
 
-# =========================
-#      Arranque
-# =========================
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     print(f"🚀 Starting API Gateway on port {port}")
@@ -442,7 +388,6 @@ if __name__ == '__main__':
     print(f"👤 User Service: {USER_SERVICE_URL}")
     print(f"📋 Task Service: {TASK_SERVICE_URL}")
 
-    # Test service connectivity on startup
     print("\n🔍 Testing service connectivity...")
     for service_name, service_url in [
         ('Auth', AUTH_SERVICE_URL),
