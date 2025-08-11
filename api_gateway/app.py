@@ -2,12 +2,13 @@ import json
 import time
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Any, List, Optional
 
 import jwt
 import requests
-from flask import Flask, make_response, request, Response
+from flask import Flask, make_response, request, Response, jsonify
 
 # Firebase Admin SDK
 from firebase_admin import credentials, initialize_app, db as fb_db, firestore as fb_fs
@@ -36,11 +37,7 @@ firebase_app = None
 firestore_client = None
 
 def _init_firebase():
-    """
-    Inicializa Firebase Admin SDK usando:
-      - FIREBASE_CREDENTIALS_FILE (ruta a serviceAccount.json) o
-      - FIREBASE_CREDENTIALS_JSON (contenido del JSON, plano o base64)
-    """
+    """Inicializa Firebase Admin SDK usando FILE o JSON/base64 en env vars."""
     global firebase_app, firestore_client
     if firebase_app:
         return
@@ -54,9 +51,9 @@ def _init_firebase():
             cred = credentials.Certificate(cred_path)
         elif cred_json:
             try:
-                data = pyjson.loads(cred_json)  # si viene como JSON plano
+                data = pyjson.loads(cred_json)  # JSON plano
             except Exception:
-                data = pyjson.loads(base64.b64decode(cred_json).decode("utf-8"))  # si viene en base64
+                data = pyjson.loads(base64.b64decode(cred_json).decode("utf-8"))  # base64
             cred = credentials.Certificate(data)
 
         if cred:
@@ -190,11 +187,169 @@ def log_response(response):
             "status_code": response.status_code,
             "response_time_seconds": round(duration, 3)
         })
-        # Guarda local + envía a Firebase
         save_log(log_data)
     except Exception as e:
         logging.error(f"Error in after_request: {e}")
     return response
+
+# ====== Helpers para leer/analizar logs de Firebase ======
+def _date_iter(start: datetime, end: datetime):
+    d = start
+    while d <= end:
+        yield d
+        d += timedelta(days=1)
+
+def _fetch_logs_from_rtdb_for_date(d: datetime) -> List[dict]:
+    """Lee todos los logs del día d (UTC) desde gateway_logs/YYYY/MM/DD/*"""
+    if not firebase_app:
+        return []
+    try:
+        path = d.strftime("gateway_logs/%Y/%m/%d")
+        ref = fb_db.reference(path, app=firebase_app)
+        raw = ref.get() or {}
+        return [v for _, v in raw.items() if isinstance(v, dict)]
+    except Exception as e:
+        app.logger.error(f"Error leyendo logs RTDB {d.date()}: {e}")
+        return []
+
+def _fetch_logs_range(start_date: datetime, end_date: datetime, limit: Optional[int]=None) -> List[dict]:
+    """Une logs de varios días (RTDB no filtra por rango de fecha)."""
+    all_logs: List[dict] = []
+    for d in _date_iter(start_date, end_date):
+        day_logs = _fetch_logs_from_rtdb_for_date(d)
+        all_logs.extend(day_logs)
+        if limit and len(all_logs) >= limit:
+            break
+    try:
+        all_logs.sort(key=lambda x: x.get("timestamp",""))
+    except Exception:
+        pass
+    return all_logs if not limit else all_logs[:limit]
+
+def _summarize_logs(logs: List[dict]) -> dict:
+    total = len(logs)
+    status_counts: Dict[str, int] = {}
+    family_counts: Dict[str, int] = {"2xx":0, "3xx":0, "4xx":0, "5xx":0, "other":0}
+    by_service: Dict[str, Dict[str, Any]] = {}
+    sum_rt = 0.0
+    min_rt = None
+    max_rt = None
+
+    for log in logs:
+        status = str(log.get("status_code", ""))
+        try:
+            rt = float(log.get("response_time_seconds", 0) or 0)
+        except Exception:
+            rt = 0.0
+        svc = log.get("servicio") or "desconocido"
+
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+        family = "other"
+        if status.isdigit():
+            s = int(status)
+            if 200 <= s <= 299: family = "2xx"
+            elif 300 <= s <= 399: family = "3xx"
+            elif 400 <= s <= 499: family = "4xx"
+            elif 500 <= s <= 599: family = "5xx"
+        family_counts[family] = family_counts.get(family, 0) + 1
+
+        sum_rt += rt
+        min_rt = rt if min_rt is None else min(min_rt, rt)
+        max_rt = rt if max_rt is None else max(max_rt, rt)
+
+        bucket = by_service.setdefault(svc, {"count":0, "sum_rt":0.0, "min_rt":None, "max_rt":None})
+        bucket["count"] += 1
+        bucket["sum_rt"] += rt
+        bucket["min_rt"] = rt if bucket["min_rt"] is None else min(bucket["min_rt"], rt)
+        bucket["max_rt"] = rt if bucket["max_rt"] is None else max(bucket["max_rt"], rt)
+
+    avg_rt = (sum_rt / total) if total else 0.0
+
+    for svc, b in by_service.items():
+        c = b["count"] or 1
+        b["avg_rt"] = round(b["sum_rt"]/c, 3)
+        b["min_rt"] = round(b["min_rt"] or 0, 3)
+        b["max_rt"] = round(b["max_rt"] or 0, 3)
+        del b["sum_rt"]
+
+    most_used = max(by_service.items(), key=lambda kv: kv[1]["count"]) if by_service else None
+    least_used = min(by_service.items(), key=lambda kv: kv[1]["count"]) if by_service else None
+    fastest = min(by_service.items(), key=lambda kv: kv[1]["avg_rt"]) if by_service else None
+    slowest = max(by_service.items(), key=lambda kv: kv[1]["avg_rt"]) if by_service else None
+
+    return {
+        "total_logs": total,
+        "status_counts": status_counts,
+        "status_families": family_counts,
+        "response_time": {
+            "avg": round(avg_rt, 3),
+            "min": round(min_rt or 0, 3),
+            "max": round(max_rt or 0, 3),
+        },
+        "by_service": by_service,
+        "most_used_api": {"servicio": most_used[0], **most_used[1]} if most_used else None,
+        "least_used_api": {"servicio": least_used[0], **least_used[1]} if least_used else None,
+        "fastest_api": {"servicio": fastest[0], **fastest[1]} if fastest else None,
+        "slowest_api": {"servicio": slowest[0], **slowest[1]} if slowest else None,
+    }
+
+# ====== Endpoints Logs para DashLogs ======
+@app.route("/logs/summary", methods=["GET"])
+def logs_summary():
+    """
+    GET /logs/summary?date=YYYY-MM-DD
+    o    /logs/summary?start=YYYY-MM-DD&end=YYYY-MM-DD
+    """
+    if not firebase_app:
+        return jsonify({"error":"Firebase no inicializado"}), 503
+
+    date_str = request.args.get("date")
+    start_str = request.args.get("start")
+    end_str = request.args.get("end")
+
+    try:
+        if date_str:
+            d = datetime.strptime(date_str, "%Y-%m-%d")
+            logs = _fetch_logs_from_rtdb_for_date(d)
+        else:
+            if not start_str and not end_str:
+                d = datetime.utcnow()
+                logs = _fetch_logs_from_rtdb_for_date(d)
+            else:
+                start = datetime.strptime(start_str, "%Y-%m-%d") if start_str else datetime.utcnow()
+                end = datetime.strptime(end_str, "%Y-%m-%d") if end_str else start
+                if end < start:
+                    start, end = end, start
+                logs = _fetch_logs_range(start, end)
+    except ValueError:
+        return jsonify({"error":"Formato de fecha inválido. Usa YYYY-MM-DD"}), 400
+
+    return jsonify(_summarize_logs(logs)), 200
+
+@app.route("/logs/recent", methods=["GET"])
+def logs_recent():
+    """
+    GET /logs/recent?date=YYYY-MM-DD&limit=200
+    Retorna los últimos N logs del día (ordenados por timestamp).
+    """
+    if not firebase_app:
+        return jsonify({"error":"Firebase no inicializado"}), 503
+
+    limit = int(request.args.get("limit", 200))
+    date_str = request.args.get("date")
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d") if date_str else datetime.utcnow()
+    except ValueError:
+        return jsonify({"error":"Formato de fecha inválido. Usa YYYY-MM-DD"}), 400
+
+    logs = _fetch_logs_from_rtdb_for_date(d)
+    try:
+        logs.sort(key=lambda x: x.get("timestamp",""))
+    except Exception:
+        pass
+    logs = logs[-limit:] if limit and len(logs) > limit else logs
+    return jsonify({"logs": logs, "count": len(logs)}), 200
 
 # ====== Servicios destino ======
 AUTH_SERVICE_URL = os.environ.get("AUTH_SERVICE_URL", "https://auth-service-75ux.onrender.com")
@@ -440,6 +595,8 @@ def not_found(error):
             '/tasks/<id>',
             '/tasks/<id>/status',
             '/tasks/stats',
+            '/logs/summary',
+            '/logs/recent',
             '/health',
             '/health/services'
         ],
