@@ -3,10 +3,16 @@ import time
 import os
 import logging
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 import jwt
 import requests
 from flask import Flask, make_response, request, Response
+
+# Firebase Admin SDK
+from firebase_admin import credentials, initialize_app, db as fb_db, firestore as fb_fs
+import json as pyjson
+import base64
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
@@ -19,13 +25,96 @@ ALLOWED_ORIGINS = {
 SECRET_KEY = os.environ.get("SECRET_KEY", "jkhfcjkdhsclhjsafjchlkrhfkñqj")
 JWT_ALGORITHM = 'HS256'
 
+# ====== Firebase init ======
+FIREBASE_DB_URL = os.environ.get(
+    "FIREBASE_DB_URL",
+    "https://logsmicroservices-default-rtdb.firebaseio.com/"
+)
+FIREBASE_ENABLE_FIRESTORE = os.environ.get("FIREBASE_ENABLE_FIRESTORE", "false").lower() == "true"
+
+firebase_app = None
+firestore_client = None
+
+def _init_firebase():
+    """
+    Inicializa Firebase Admin SDK usando:
+      - FIREBASE_CREDENTIALS_FILE (ruta a serviceAccount.json) o
+      - FIREBASE_CREDENTIALS_JSON (contenido del JSON, plano o base64)
+    """
+    global firebase_app, firestore_client
+    if firebase_app:
+        return
+
+    cred = None
+    cred_path = os.environ.get("FIREBASE_CREDENTIALS_FILE")
+    cred_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
+
+    try:
+        if cred_path and os.path.exists(cred_path):
+            cred = credentials.Certificate(cred_path)
+        elif cred_json:
+            try:
+                data = pyjson.loads(cred_json)  # si viene como JSON plano
+            except Exception:
+                data = pyjson.loads(base64.b64decode(cred_json).decode("utf-8"))  # si viene en base64
+            cred = credentials.Certificate(data)
+
+        if cred:
+            firebase_app = initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
+            if FIREBASE_ENABLE_FIRESTORE:
+                firestore_client = fb_fs.client()
+            app.logger.info("✅ Firebase inicializado")
+        else:
+            app.logger.warning("⚠️  No hay credenciales Firebase; se omite envío a Firebase.")
+    except Exception as e:
+        app.logger.error(f"❌ Error inicializando Firebase: {e}")
+
+_init_firebase()
+
+def push_log_to_realtime_db(data: dict):
+    """Envía un log a Realtime Database en ruta gateway_logs/YYYY/MM/DD/autoKey"""
+    if not firebase_app:
+        return
+    try:
+        date_path = datetime.utcnow().strftime("%Y/%m/%d")
+        ref = fb_db.reference(f"gateway_logs/{date_path}", app=firebase_app)
+        ref.push(data)
+    except Exception as e:
+        app.logger.error(f"Error enviando log a Realtime DB: {e}")
+
+def push_log_to_firestore(data: dict):
+    """(Opcional) Envía un log a Firestore en gateway_logs/{YYYY-MM-DD}/entries/*"""
+    if not firestore_client:
+        return
+    try:
+        date_key = datetime.utcnow().strftime("%Y-%m-%d")
+        firestore_client.collection("gateway_logs").document(date_key)\
+            .collection("entries").add(data)
+    except Exception as e:
+        app.logger.error(f"Error enviando log a Firestore: {e}")
+
+# Pool para envío no bloqueante
+_log_executor = ThreadPoolExecutor(max_workers=4)
+
 def save_log(data):
+    """Guarda en archivo .jsonl y manda a Firebase (async)"""
     try:
         log_line = json.dumps(data, ensure_ascii=False)
         with open("gateway_logs.jsonl", "a", encoding="utf-8") as log_file:
             log_file.write(log_line + "\n")
     except Exception as e:
-        logging.error(f"Error saving log: {e}")
+        logging.error(f"Error saving log (file): {e}")
+
+    # Enviar a Firebase en background (no bloquea la respuesta al cliente)
+    def _send():
+        try:
+            push_log_to_realtime_db(data)
+            if FIREBASE_ENABLE_FIRESTORE:
+                push_log_to_firestore(data)
+        except Exception as _e:
+            logging.error(f"Error saving log (firebase): {_e}")
+
+    _log_executor.submit(_send)
 
 def _build_allow_headers():
     requested = (request.headers.get("Access-Control-Request-Headers", "") or "").lower()
@@ -96,11 +185,12 @@ def log_response(response):
 
     try:
         duration = time.time() - getattr(request, 'start_time', time.time())
-        log_data = getattr(request, 'log_data', {})
+        log_data = getattr(request, 'log_data', {}).copy()
         log_data.update({
             "status_code": response.status_code,
             "response_time_seconds": round(duration, 3)
         })
+        # Guarda local + envía a Firebase
         save_log(log_data)
     except Exception as e:
         logging.error(f"Error in after_request: {e}")
