@@ -6,14 +6,9 @@ from functools import wraps
 
 import jwt
 from flask import Flask, jsonify, request
-# ❌ No uses CORS aquí; el navegador sólo llama al Gateway.
-# from flask_cors import CORS
 
 # Crear la aplicación Flask
 app = Flask(__name__)
-# Si quisieras CORS para pruebas directas (no recomendado):
-# from flask_cors import CORS
-# CORS(app, origins=["http://localhost:4200", "https://gui-angular.vercel.app"])
 
 # ✅ PATHS – Base de datos compartida entre servicios
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -21,7 +16,7 @@ SHARED_DB_DIR = os.path.join(BASE_DIR, '..', 'shared_data')
 os.makedirs(SHARED_DB_DIR, exist_ok=True)
 DB_NAME = os.path.join(SHARED_DB_DIR, 'main_database.db')
 
-# 🔒 Debe ser el mismo SECRET_KEY que usa el Auth Service
+# 🔒 Debe ser el mismo SECRET_KEY que usa el Auth Service / Gateway
 SECRET_KEY = 'jkhfcjkdhsclhjsafjchlkrhfkhjfkñqj'
 
 # =========================
@@ -44,16 +39,42 @@ def token_required(f):
         return f(*args, **kwargs)
     return decorated
 
-def _get_user_id_from_token():
-    """Obtiene y normaliza el id de usuario desde el JWT (id | user_id | sub)."""
+def _resolve_user_id():
+    """
+    Intenta obtener un ID numérico desde el JWT.
+    Si solo hay email/username, lo busca en la tabla users.
+    """
     uid = None
+    email = None
+    username = None
+
     if hasattr(request, "user") and isinstance(request.user, dict):
         uid = request.user.get('id') or request.user.get('user_id') or request.user.get('sub')
+        email = request.user.get('email')
+        username = request.user.get('username')
+
+    # Si ya es numérico, úsalo
     try:
-        uid = int(uid) if uid is not None else None
+        if uid is not None:
+            return int(uid)
     except (TypeError, ValueError):
-        uid = None
-    return uid
+        pass
+
+    # Buscar por email/username
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        if email:
+            c.execute("SELECT id FROM users WHERE email = ?", (email,))
+            row = c.fetchone()
+            if row:
+                return int(row[0])
+        if username:
+            c.execute("SELECT id FROM users WHERE username = ?", (username,))
+            row = c.fetchone()
+            if row:
+                return int(row[0])
+
+    return None
 
 # =========================
 #   Inicialización de BD
@@ -97,7 +118,6 @@ def init_db():
                 )
             ''')
 
-            # métricas
             cursor.execute("SELECT COUNT(*) FROM users")
             user_count = cursor.fetchone()[0]
             cursor.execute("SELECT COUNT(*) FROM tasks")
@@ -115,7 +135,7 @@ def init_db():
         print(f"❌ Task Service: Error inicializando BD: {e}")
         traceback.print_exc()
 
-# ⚠️ Importante: inicializar BD al cargar el módulo (funciona en Gunicorn/Render)
+# ⚠️ Importante: inicializar BD al cargar el módulo
 init_db()
 
 def get_utc_now():
@@ -144,9 +164,9 @@ def create_task():
         return jsonify({'error': 'Faltan campos obligatorios', 'missing_fields': missing}), 400
 
     try:
-        created_by = _get_user_id_from_token()
+        created_by = _resolve_user_id()
         if not created_by:
-            return jsonify({'error': 'Token inválido: falta id de usuario'}), 401
+            return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         create_at = get_utc_now().isoformat()
 
@@ -188,7 +208,21 @@ def create_task():
             conn.commit()
             task_id = cursor.lastrowid
 
-        return jsonify({'message': 'Tarea creada exitosamente', 'task_id': task_id, 'created_at': create_at}), 201
+        # Devuelve la tarea completa para inserción optimista
+        return jsonify({
+            'message': 'Tarea creada exitosamente',
+            'task': {
+                'id': task_id,
+                'name': data['name'].strip(),
+                'description': data['description'].strip(),
+                'create_at': create_at,
+                'deadline': deadline,
+                'status': status,
+                'isAlive': True,
+                'priority': priority,
+                'updated_at': create_at
+            }
+        }), 201
 
     except Exception as e:
         print(f"❌ Error creando tarea: {e}")
@@ -200,9 +234,9 @@ def create_task():
 @token_required
 def get_tasks():
     try:
-        created_by = _get_user_id_from_token()
+        created_by = _resolve_user_id()
         if not created_by:
-            return jsonify({'error': 'Token inválido: falta id de usuario'}), 401
+            return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         status_filter = request.args.get('status')
         priority_filter = request.args.get('priority')
@@ -225,7 +259,7 @@ def get_tasks():
 
         query += ' ORDER BY create_at DESC'
 
-        if limit:
+        if limit is not None:
             query += ' LIMIT ? OFFSET ?'
             params.extend([limit, offset])
 
@@ -279,9 +313,9 @@ def get_tasks():
 @token_required
 def get_task(task_id):
     try:
-        created_by = _get_user_id_from_token()
+        created_by = _resolve_user_id()
         if not created_by:
-            return jsonify({'error': 'Token inválido: falta id de usuario'}), 401
+            return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -312,9 +346,9 @@ def get_task(task_id):
 @token_required
 def update_task(task_id):
     try:
-        created_by = _get_user_id_from_token()
+        created_by = _resolve_user_id()
         if not created_by:
-            return jsonify({'error': 'Token inválido: falta id de usuario'}), 401
+            return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         data = request.get_json() or {}
         allowed_fields = ['name', 'description', 'deadline', 'status', 'priority']
@@ -367,14 +401,49 @@ def update_task(task_id):
         traceback.print_exc()
         return jsonify({'error': 'Error interno del servidor'}), 500
 
+# ------- Actualizar SOLO el estado (drag & drop)
+@app.route('/tasks/<int:task_id>/status', methods=['PUT'])
+@token_required
+def update_task_status(task_id):
+    try:
+        created_by = _resolve_user_id()
+        if not created_by:
+            return jsonify({'error': 'Token inválido: no se pudo resolver id de usuario'}), 401
+
+        data = request.get_json() or {}
+        new_status = data.get('status')
+        valid_statuses = ['InProgress', 'Revision', 'Completed', 'Paused']
+        if new_status not in valid_statuses:
+            return jsonify({'error': 'Estado inválido', 'valid_statuses': valid_statuses}), 400
+
+        updated_at = get_utc_now().isoformat()
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE tasks
+                SET status = ?, updated_at = ?
+                WHERE id = ? AND created_by = ? AND isAlive = 1
+            ''', (new_status, updated_at, task_id, created_by))
+            conn.commit()
+
+            if cursor.rowcount == 0:
+                return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
+
+        return jsonify({'message': 'Estado actualizado', 'task_id': task_id, 'status': new_status, 'updated_at': updated_at}), 200
+
+    except Exception as e:
+        print(f"❌ Error actualizando estado de tarea {task_id}: {e}")
+        traceback.print_exc()
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
 # ------- Borrado lógico
 @app.route('/tasks/<int:task_id>', methods=['DELETE'])
 @token_required
 def delete_task(task_id):
     try:
-        created_by = _get_user_id_from_token()
+        created_by = _resolve_user_id()
         if not created_by:
-            return jsonify({'error': 'Token inválido: falta id de usuario'}), 401
+            return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         current_time = get_utc_now().isoformat()
         with sqlite3.connect(DB_NAME) as conn:
@@ -404,9 +473,9 @@ def delete_task(task_id):
 @token_required
 def get_task_stats():
     try:
-        created_by = _get_user_id_from_token()
+        created_by = _resolve_user_id()
         if not created_by:
-            return jsonify({'error': 'Token inválido: falta id de usuario'}), 401
+            return jsonify({'error': 'Token inválido: no se pudo resolver el id de usuario'}), 401
 
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -490,3 +559,8 @@ def db_info():
             'database_path': DB_NAME,
             'database_exists': os.path.exists(DB_NAME)
         }), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5002))
+    print(f"🚀 Task Service on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
