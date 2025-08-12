@@ -25,7 +25,7 @@ app = Flask(__name__)
 ALLOWED_ORIGINS = {
     "http://localhost:4200",
     "https://gui-angular.vercel.app",
-    "https://taskapp-zeta-bice.vercel.app"
+    "https://taskapp-zeta-bice.vercel.app/"
 }
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "jkhfcjkdhsclhjsafjchlkrhfkñqj")
@@ -753,4 +753,5 @@ if __name__ == '__main__':
 
     print(f"\n🌐 Gateway available at: http://localhost:{port}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
